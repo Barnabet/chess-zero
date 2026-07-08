@@ -144,8 +144,11 @@ class SelfplayConfig:
     full_search_prob: float = 0.25    # fraction of steps run at sims_full
     max_considered_actions: int = 16  # Gumbel root candidates
     steps_per_generation: int = 16    # env steps (all slots) per generation
-    resign_threshold: float = 0.95    # resign when mover E[value] < -threshold…
-    resign_consecutive_plies: int = 4 # …for this many consecutive plies
+    resign_threshold: float = 0.95     # resign when mover E[value] < -threshold…
+    resign_consecutive_moves: int = 2  # …on this many consecutive OWN moves
+                                       # (per-player counter — values are
+                                       # mover-relative and alternate sign, so a
+                                       # shared ply counter would never trip)
     resign_holdout_frac: float = 0.10 # games that never resign (FP measurement)
 
 
@@ -984,9 +987,46 @@ def test_flush_emits_correct_targets():
     assert len(w.slots[0].obs) == 0                      # slot recycled
 
 
+def _record(movers, values):
+    """Synthetic single-step device record for host-logic tests."""
+    n = len(movers)
+    return {
+        "obs": np.zeros((n, 8, 8, 119), np.float16),
+        "action_weights": np.full((n, 4672), 1 / 4672, np.float16),
+        "action": np.zeros(n, np.int64),
+        "root_value": np.asarray(values, np.float32),
+        "mover": np.asarray(movers, np.int64),
+        "rewards": np.zeros((n, 2), np.float32),
+        "done": np.zeros(n, bool),
+    }
+
+
+def test_resign_counter_is_per_player():
+    cfg = _tiny_cfg(num_games=1, resign_threshold=0.9, resign_consecutive_moves=2)
+    w, _ = _worker(cfg)
+    examples, stats = [], GenStats()
+    # decided game: player 0 hopeless on own moves, player 1 confident on theirs
+    for mover, val in [(0, -0.95), (1, 0.95)]:
+        w._process(_record([mover], [val]), True, True, examples, stats)
+    assert stats.resigns == 0            # one bad own-move is not enough
+    w._process(_record([0], [-0.95]), True, True, examples, stats)
+    assert stats.resigns == 1            # 2nd consecutive bad own-move trips
+    assert [e.wdl for e in examples] == [2, 0, 2]  # loser L, winner W, loser L
+
+
+def test_resign_counter_resets_on_recovery():
+    cfg = _tiny_cfg(num_games=1, resign_threshold=0.9, resign_consecutive_moves=2)
+    w, _ = _worker(cfg)
+    examples, stats = [], GenStats()
+    seq = [(0, -0.95), (1, 0.95), (0, 0.0), (1, 0.95), (0, -0.95)]
+    for mover, val in seq:
+        w._process(_record([mover], [val]), True, True, examples, stats)
+    assert stats.resigns == 0            # recovery at ply 3 reset player 0's count
+
+
 def test_resignation_forces_loss():
-    cfg = _tiny_cfg(resign_threshold=-1.1,  # value always > -(-1.1) -> trip instantly
-                    resign_consecutive_plies=2, steps_per_generation=4)
+    cfg = _tiny_cfg(resign_threshold=-1.1,  # -thr = +1.1: every value < 1.1 is "hopeless"
+                    resign_consecutive_moves=2, steps_per_generation=4)
     w, params = _worker(cfg)
     examples, stats = w.run_generation(params, allow_resign=True)
     assert stats.resigns >= 1                            # games got adjudicated
@@ -1047,7 +1087,7 @@ class _Slot:
     weights: list = field(default_factory=list)      # per-ply f16 array or None
     mover: list = field(default_factory=list)
     root_value: list = field(default_factory=list)
-    resign_count: int = 0
+    resign_counts: list = field(default_factory=lambda: [0, 0])  # per player id
     resign_would_have: int = -1                      # 1-based ply, -1 = never
     holdout: bool = False
 
@@ -1113,24 +1153,26 @@ class SelfplayWorker:
         new_reset = np.zeros(self.n, bool)
         for i in range(self.n):
             slot = self.slots[i]
+            p = int(movers[i])
             slot.obs.append(obs[i])
             slot.weights.append(weights[i] if full else None)
-            slot.mover.append(int(movers[i]))
+            slot.mover.append(p)
             slot.root_value.append(float(values[i]))
+            # per-player counter: values are mover-relative, so only player
+            # p's own moves speak to whether p should resign
             if float(values[i]) < -sp.resign_threshold:
-                slot.resign_count += 1
+                slot.resign_counts[p] += 1
             else:
-                slot.resign_count = 0
-            tripped = slot.resign_count >= sp.resign_consecutive_plies
+                slot.resign_counts[p] = 0
+            tripped = slot.resign_counts[p] >= sp.resign_consecutive_moves
             if tripped and slot.resign_would_have < 0:
                 slot.resign_would_have = len(slot.obs)
             if done[i]:
                 self._flush(i, rewards[i], examples, stats, resigned=False)
                 new_reset[i] = True
             elif allow_resign and tripped and not slot.holdout:
-                loser = int(movers[i])
                 fake = np.zeros(2, np.float32)
-                fake[loser], fake[1 - loser] = -1.0, 1.0
+                fake[p], fake[1 - p] = -1.0, 1.0
                 self._flush(i, fake, examples, stats, resigned=True)
                 new_reset[i] = True
         self.reset_mask = new_reset
@@ -1163,7 +1205,7 @@ Note the ordering contract with Task 5: `reset_mask` slots are replaced with fre
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `pytest tests/test_selfplay_worker.py -v`
-Expected: 4 passed (~1–2 min, includes compiles)
+Expected: 6 passed (~1–2 min, includes compiles)
 
 - [ ] **Step 5: Commit**
 
