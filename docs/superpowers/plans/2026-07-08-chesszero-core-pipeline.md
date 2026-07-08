@@ -1678,8 +1678,10 @@ class Trainer:
 
     def _save_best(self):
         best_dir = (self.run_dir / "best").absolute()
-        ocp.StandardCheckpointer().save(
-            best_dir, args=ocp.args.StandardSave(self.best_params), force=True)
+        # orbax 0.12 StandardCheckpointer takes the state positionally and
+        # saves asynchronously; the context manager waits before returning.
+        with ocp.StandardCheckpointer() as ckptr:
+            ckptr.save(best_dir, self.best_params, force=True)
 
     # -- main loop -----------------------------------------------------------
     def run(self, max_generations: int | None = None):
@@ -1810,8 +1812,8 @@ def engine(tmp_path_factory):
     net = ChessNet(cfg.net)
     params = net.init(jax.random.PRNGKey(0), jnp.zeros((1, 8, 8, 119)))
     best = tmp_path_factory.mktemp("ck") / "best"
-    ocp.StandardCheckpointer().save(
-        best.absolute(), args=ocp.args.StandardSave(params), force=True)
+    with ocp.StandardCheckpointer() as ckptr:
+        ckptr.save(best.absolute(), params, force=True)
     return Engine(best, cfg)
 
 
@@ -1884,8 +1886,9 @@ class Engine:
         self.net = ChessNet(cfg.net)
         template = self.net.init(jax.random.PRNGKey(0),
                                  jnp.zeros((1, 8, 8, 119), jnp.float32))
+        # orbax 0.12 StandardCheckpointer: positional target, no args= kwarg
         self.params = ocp.StandardCheckpointer().restore(
-            Path(best_dir).absolute(), args=ocp.args.StandardRestore(template))
+            Path(best_dir).absolute(), template)
         self._search_fns: dict[int, callable] = {}
         self.key = jax.random.PRNGKey(0)
         self.sims_per_s: float | None = None
