@@ -59,10 +59,13 @@ def _make_versus_step(net, sims, max_considered):
             invalid_actions=~state.legal_action_mask,
             max_num_considered_actions=max_considered,
             gumbel_scale=0.0)
-        # opening diversity: sample from improved policy on early plies
-        w = jnp.maximum(out.action_weights, 1e-9)
+        # opening diversity: sample from improved policy on early plies;
+        # illegal actions get -inf so they can never be drawn
+        logw = jnp.where(state.legal_action_mask,
+                         jnp.log(jnp.maximum(out.action_weights, 1e-9)),
+                         -jnp.inf)
         sampled = jax.random.categorical(
-            k_sample, jnp.log(w) / temperature, axis=-1)
+            k_sample, logw / temperature, axis=-1)
         action = jnp.where(temperature_mask, sampled, out.action)
         next_state = jax.vmap(ENV.step)(state, action)
         # freeze finished games: keep terminal state, don't step it
@@ -76,6 +79,20 @@ def _make_versus_step(net, sims, max_considered):
     return versus_step
 
 
+_VERSUS_CACHE: dict = {}
+
+
+def _get_versus_step(net, sims, max_considered):
+    """Cache jitted versus steps — a fresh jit per gate would re-XLA-compile
+    the whole two-net search graph every gate (~180x over a 24h run). Keyed
+    by id(net): valid while the caller keeps one net instance alive per
+    process, which the Trainer does."""
+    key = (id(net), sims, max_considered)
+    if key not in _VERSUS_CACHE:
+        _VERSUS_CACHE[key] = _make_versus_step(net, sims, max_considered)
+    return _VERSUS_CACHE[key]
+
+
 def play_match(net, params_a, params_b, cfg: Config, seed: int = 0) -> float:
     g = cfg.gating
     n = g.games
@@ -85,8 +102,8 @@ def play_match(net, params_a, params_b, cfg: Config, seed: int = 0) -> float:
     a_white = np.arange(n) < n // 2
     a_player = jnp.asarray(np.where(a_white, white_id, 1 - white_id))
     params = {"a": params_a, "b": params_b, "a_player": a_player}
-    step = _make_versus_step(net, cfg.selfplay.sims_full,
-                             cfg.selfplay.max_considered_actions)
+    step = _get_versus_step(net, cfg.selfplay.sims_full,
+                            cfg.selfplay.max_considered_actions)
     key = jax.random.PRNGKey(seed * 2 + 1)
     ply = 0
     while True:

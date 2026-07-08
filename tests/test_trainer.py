@@ -17,6 +17,14 @@ def cfg(tmp_path):
     return c
 
 
+def test_resign_fp_alarm_thresholds():
+    from chesszero.train import resign_fp_alarm
+    assert resign_fp_alarm(0, 0) is None      # no data
+    assert resign_fp_alarm(5, 19) is None     # below min_n
+    assert resign_fp_alarm(1, 20) is None     # exactly 5%: not exceeded
+    assert resign_fp_alarm(2, 20) == 0.1      # tripped
+
+
 @pytest.mark.slow
 def test_train_checkpoint_resume(cfg):
     t = Trainer(cfg)

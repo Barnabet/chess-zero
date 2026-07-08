@@ -69,6 +69,16 @@ from chesszero.net import ChessNet
 from chesszero.selfplay import SelfplayWorker, pack_examples
 
 
+def resign_fp_alarm(fp_total: int, n_total: int, *,
+                    threshold: float = 0.05, min_n: int = 20) -> "float | None":
+    """Spec §5 alarm: fraction of held-out would-resign games that were NOT
+    actually lost. Returns the rate when it exceeds threshold with enough
+    samples, else None."""
+    if n_total >= min_n and fp_total > threshold * n_total:
+        return round(fp_total / n_total, 3)
+    return None
+
+
 class Trainer:
     def __init__(self, cfg: Config):
         self.cfg = cfg
@@ -86,6 +96,8 @@ class Trainer:
         self.global_step = 0
         self.start_generation = 0
         self.gate_failures = 0
+        self.holdout_fp_total = 0
+        self.holdout_n_total = 0
         self._last_saved_gen = -1
 
         self.mgr = ocp.CheckpointManager(
@@ -104,7 +116,9 @@ class Trainer:
                 "best_params": self.best_params,
                 "meta": {"generation": np.asarray(self.start_generation),
                          "global_step": np.asarray(self.global_step),
-                         "gate_failures": np.asarray(self.gate_failures)}}
+                         "gate_failures": np.asarray(self.gate_failures),
+                         "holdout_fp_total": np.asarray(self.holdout_fp_total),
+                         "holdout_n_total": np.asarray(self.holdout_n_total)}}
 
     def _maybe_restore(self):
         step = self.mgr.latest_step()
@@ -118,6 +132,8 @@ class Trainer:
         self.start_generation = int(restored["meta"]["generation"]) + 1
         self.global_step = int(restored["meta"]["global_step"])
         self.gate_failures = int(restored["meta"]["gate_failures"])
+        self.holdout_fp_total = int(restored["meta"]["holdout_fp_total"])
+        self.holdout_n_total = int(restored["meta"]["holdout_n_total"])
         self._last_saved_gen = int(restored["meta"]["generation"])
 
     def _save(self, generation: int):
@@ -145,6 +161,8 @@ class Trainer:
             allow_resign = self.global_step >= cfg.train.resign_min_train_steps
             examples, stats = self.worker.run_generation(self.params,
                                                          allow_resign)
+            self.holdout_fp_total += stats.holdout_false_positives
+            self.holdout_n_total += stats.holdout_resign_games
             if examples:
                 self.buffer.add(*pack_examples(examples))
             metrics = {}
@@ -170,6 +188,10 @@ class Trainer:
                    "holdout_fp": stats.holdout_false_positives,
                    "holdout_n": stats.holdout_resign_games,
                    "gen_seconds": time.time() - t0, **metrics}
+            fp_rate = resign_fp_alarm(self.holdout_fp_total,
+                                      self.holdout_n_total)
+            if fp_rate is not None:
+                row["resign_fp_alarm"] = fp_rate
 
             if (gen + 1) % cfg.gate_every_generations == 0 \
                     and self.global_step > 0:

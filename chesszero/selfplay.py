@@ -17,10 +17,11 @@ from chesszero.net import value_from_wdl
 
 ENV = pgx.make("chess")
 
+_JIT_INIT = jax.jit(jax.vmap(ENV.init))  # jit once; retraces only per new n
+
 
 def init_batch(n: int, seed: int):
-    keys = jax.random.split(jax.random.PRNGKey(seed), n)
-    return jax.jit(jax.vmap(ENV.init))(keys)
+    return _JIT_INIT(jax.random.split(jax.random.PRNGKey(seed), n))
 
 
 def net_forward(net, params, obs, legal_mask):
