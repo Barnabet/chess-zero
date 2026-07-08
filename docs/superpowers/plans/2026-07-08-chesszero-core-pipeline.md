@@ -1593,7 +1593,33 @@ def test_train_checkpoint_resume(cfg):
     assert t2.start_generation == 3
     t2.run(max_generations=5)
     lines = [json.loads(l) for l in (run / "metrics.jsonl").read_text().splitlines()]
-    assert lines[-1]["gen"] == 4
+    assert lines[-1]["gen"] == 4 and len(lines) == 5
+
+
+@pytest.mark.slow
+def test_training_gating_checkpoint_after_donation(cfg):
+    """Force the training path (buffer pre-seeded past min_buffer) so the
+    donation-sensitive best_params/checkpoint/gating code actually executes.
+    Catches aliasing of donated buffers, which the organic 3-gen run cannot
+    reach (games don't finish that fast)."""
+    import numpy as np
+
+    from chesszero.selfplay import Example, pack_examples
+
+    cfg.gate_every_generations = 2      # gate fires at gen 1
+    t = Trainer(cfg)
+    exs = [Example(np.zeros((8, 8, 119), np.float16),
+                   np.full(4672, 1 / 4672, np.float16) if i % 2 == 0 else None,
+                   i % 3, 10)
+           for i in range(cfg.train.min_buffer + 64)]
+    t.buffer.add(*pack_examples(exs))
+    t.run(max_generations=2)            # trains, checkpoints, gates — no crash
+    run = pathlib.Path(cfg.run_dir)
+    lines = [json.loads(l) for l in (run / "metrics.jsonl").read_text().splitlines()]
+    assert "policy_loss" in lines[-1]                 # training fired
+    assert any("gate_score" in l for l in lines)      # gating fired
+    t2 = Trainer(cfg)                                 # checkpoint is loadable
+    assert t2.start_generation == 2 and t2.global_step > 0
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1633,7 +1659,9 @@ class Trainer:
         self.params = self.net.init(key, dummy)
         self.tx = make_optimizer(cfg.train)
         self.opt_state = self.tx.init(self.params)
-        self.best_params = self.params
+        # deep copy — train_step donates params buffers; an alias here would
+        # be deleted by the first gradient step and crash the next save/gate
+        self.best_params = jax.tree.map(jnp.copy, self.params)
         self.global_step = 0
         self.start_generation = 0
         self.gate_failures = 0
@@ -1654,7 +1682,8 @@ class Trainer:
         return {"params": self.params, "opt_state": self.opt_state,
                 "best_params": self.best_params,
                 "meta": {"generation": np.asarray(self.start_generation),
-                         "global_step": np.asarray(self.global_step)}}
+                         "global_step": np.asarray(self.global_step),
+                         "gate_failures": np.asarray(self.gate_failures)}}
 
     def _maybe_restore(self):
         step = self.mgr.latest_step()
@@ -1667,6 +1696,7 @@ class Trainer:
         self.best_params = restored["best_params"]
         self.start_generation = int(restored["meta"]["generation"]) + 1
         self.global_step = int(restored["meta"]["global_step"])
+        self.gate_failures = int(restored["meta"]["gate_failures"])
         self._last_saved_gen = int(restored["meta"]["generation"])
 
     def _save(self, generation: int):
@@ -1726,7 +1756,7 @@ class Trainer:
                                    cfg, seed=cfg.seed + gen)
                 row["gate_score"] = score
                 if score >= cfg.gating.promote_threshold:
-                    self.best_params = self.params
+                    self.best_params = jax.tree.map(jnp.copy, self.params)
                     self.gate_failures = 0
                     self._save_best()
                 else:
@@ -1759,6 +1789,7 @@ if __name__ == "__main__":
 
 Careful points the implementer must preserve:
 - `_maybe_restore` builds the abstract tree from `self._payload()` — params/opt_state templates must be constructed *before* restore (they are: `__init__` inits them first).
+- `best_params` must NEVER alias `self.params` (`jax.tree.map(jnp.copy, ...)` at both assignment sites): `train_step` donates the params buffers, so an alias is deleted by the first gradient step and the next `_save`/`play_match` crashes with "Array has been deleted".
 - `_save(gen)` sets `start_generation = gen` so the payload's meta is current; restore adds +1.
 - Orbax steps must be unique and monotonically increasing: `_save` keys checkpoints by generation and the `_last_saved_gen` guard makes duplicate or regressive saves (e.g. the trailing `_save` after a no-op resume, or re-running with a smaller `--generations`) a silent no-op. `_maybe_restore` must set `_last_saved_gen` to the restored generation.
 - Buffer restarts empty on resume by design (spec §6); `min_buffer` gates training until refilled.
@@ -1766,7 +1797,7 @@ Careful points the implementer must preserve:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `timeout 900 pytest tests/test_trainer.py -v -m slow`
-Expected: 1 passed (tiny config; a few minutes on the 4090)
+Expected: 2 passed (tiny config; a few minutes on the 4090)
 
 - [ ] **Step 5: Commit**
 
