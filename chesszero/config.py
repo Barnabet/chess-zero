@@ -24,8 +24,11 @@ class SelfplayConfig:
     full_search_prob: float = 0.25    # fraction of steps run at sims_full
     max_considered_actions: int = 16  # Gumbel root candidates
     steps_per_generation: int = 16    # env steps (all slots) per generation
-    resign_threshold: float = 0.95    # resign when mover E[value] < -threshold…
-    resign_consecutive_plies: int = 4 # …for this many consecutive plies
+    resign_threshold: float = 0.95     # resign when mover E[value] < -threshold…
+    resign_consecutive_moves: int = 2  # …on this many consecutive OWN moves
+                                       # (per-player counter — values are
+                                       # mover-relative and alternate sign, so a
+                                       # shared ply counter would never trip)
     resign_holdout_frac: float = 0.10 # games that never resign (FP measurement)
 
 

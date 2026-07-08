@@ -121,7 +121,7 @@ class _Slot:
     weights: list = field(default_factory=list)      # per-ply f16 array or None
     mover: list = field(default_factory=list)
     root_value: list = field(default_factory=list)
-    resign_count: int = 0
+    resign_counts: list = field(default_factory=lambda: [0, 0])  # per player id
     resign_would_have: int = -1                      # 1-based ply, -1 = never
     holdout: bool = False
 
@@ -187,24 +187,26 @@ class SelfplayWorker:
         new_reset = np.zeros(self.n, bool)
         for i in range(self.n):
             slot = self.slots[i]
+            p = int(movers[i])
             slot.obs.append(obs[i])
             slot.weights.append(weights[i] if full else None)
-            slot.mover.append(int(movers[i]))
+            slot.mover.append(p)
             slot.root_value.append(float(values[i]))
+            # per-player counter: values are mover-relative, so only player
+            # p's own moves speak to whether p should resign
             if float(values[i]) < -sp.resign_threshold:
-                slot.resign_count += 1
+                slot.resign_counts[p] += 1
             else:
-                slot.resign_count = 0
-            tripped = slot.resign_count >= sp.resign_consecutive_plies
+                slot.resign_counts[p] = 0
+            tripped = slot.resign_counts[p] >= sp.resign_consecutive_moves
             if tripped and slot.resign_would_have < 0:
                 slot.resign_would_have = len(slot.obs)
             if done[i]:
                 self._flush(i, rewards[i], examples, stats, resigned=False)
                 new_reset[i] = True
             elif allow_resign and tripped and not slot.holdout:
-                loser = int(movers[i])
                 fake = np.zeros(2, np.float32)
-                fake[loser], fake[1 - loser] = -1.0, 1.0
+                fake[p], fake[1 - p] = -1.0, 1.0
                 self._flush(i, fake, examples, stats, resigned=True)
                 new_reset[i] = True
         self.reset_mask = new_reset

@@ -54,9 +54,46 @@ def test_flush_emits_correct_targets():
     assert len(w.slots[0].obs) == 0                      # slot recycled
 
 
+def _record(movers, values):
+    """Synthetic single-step device record for host-logic tests."""
+    n = len(movers)
+    return {
+        "obs": np.zeros((n, 8, 8, 119), np.float16),
+        "action_weights": np.full((n, 4672), 1 / 4672, np.float16),
+        "action": np.zeros(n, np.int64),
+        "root_value": np.asarray(values, np.float32),
+        "mover": np.asarray(movers, np.int64),
+        "rewards": np.zeros((n, 2), np.float32),
+        "done": np.zeros(n, bool),
+    }
+
+
+def test_resign_counter_is_per_player():
+    cfg = _tiny_cfg(num_games=1, resign_threshold=0.9, resign_consecutive_moves=2)
+    w, _ = _worker(cfg)
+    examples, stats = [], GenStats()
+    # decided game: player 0 hopeless on own moves, player 1 confident on theirs
+    for mover, val in [(0, -0.95), (1, 0.95)]:
+        w._process(_record([mover], [val]), True, True, examples, stats)
+    assert stats.resigns == 0            # one bad own-move is not enough
+    w._process(_record([0], [-0.95]), True, True, examples, stats)
+    assert stats.resigns == 1            # 2nd consecutive bad own-move trips
+    assert [e.wdl for e in examples] == [2, 0, 2]  # loser L, winner W, loser L
+
+
+def test_resign_counter_resets_on_recovery():
+    cfg = _tiny_cfg(num_games=1, resign_threshold=0.9, resign_consecutive_moves=2)
+    w, _ = _worker(cfg)
+    examples, stats = [], GenStats()
+    seq = [(0, -0.95), (1, 0.95), (0, 0.0), (1, 0.95), (0, -0.95)]
+    for mover, val in seq:
+        w._process(_record([mover], [val]), True, True, examples, stats)
+    assert stats.resigns == 0            # recovery at ply 3 reset player 0's count
+
+
 def test_resignation_forces_loss():
-    cfg = _tiny_cfg(resign_threshold=-1.1,  # value always > -(-1.1) -> trip instantly
-                    resign_consecutive_plies=2, steps_per_generation=4)
+    cfg = _tiny_cfg(resign_threshold=-1.1,  # -thr = +1.1: every value < 1.1 is "hopeless"
+                    resign_consecutive_moves=2, steps_per_generation=4)
     w, params = _worker(cfg)
     examples, stats = w.run_generation(params, allow_resign=True)
     assert stats.resigns >= 1                            # games got adjudicated
