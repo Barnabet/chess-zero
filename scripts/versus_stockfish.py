@@ -214,6 +214,9 @@ def main():
     ap.add_argument("--sf", default="/usr/games/stockfish")
     ap.add_argument("--opening-plies", type=int, default=4,
                     help="random opening plies for game variety (default 4)")
+    ap.add_argument("--clean-first", action="store_true",
+                    help="first game of the session starts from the standard "
+                         "position (no random opening plies)")
     ap.add_argument("--max-plies", type=int, default=400,
                     help="adjudicate draw beyond this many plies (default 400)")
     ap.add_argument("--seed", type=int, default=0)
@@ -233,6 +236,7 @@ def main():
                  "negamax2": lambda: NegamaxPlayer(rng, 2),
                  "negamax3": lambda: NegamaxPlayer(rng, 3)}
     sf = None
+    first_done = False
     try:
         for token in args.vs:
             if token.lower() in baselines:
@@ -255,9 +259,12 @@ def main():
             total, watch = 0.0, args.watch
             for g in range(args.games):
                 we_are_white = g % 2 == 0
+                opening = 0 if args.clean_first and not first_done \
+                    else args.opening_plies
+                first_done = True
                 score, result, watch = play_game(
                     eng, opponent, args.movetime, we_are_white,
-                    args.opening_plies, args.max_plies, watch, rng)
+                    opening, args.max_plies, watch, rng)
                 total += score
                 tag = {1.0: "WIN", 0.5: "draw", 0.0: "loss"}[score]
                 print(f"[{opponent.name}] game {g + 1}/{args.games} "
