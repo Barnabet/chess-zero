@@ -80,7 +80,9 @@ class Trainer:
         self.params = self.net.init(key, dummy)
         self.tx = make_optimizer(cfg.train)
         self.opt_state = self.tx.init(self.params)
-        self.best_params = self.params
+        # deep copy — train_step donates params buffers; an alias here would
+        # be deleted by the first gradient step and crash the next save/gate
+        self.best_params = jax.tree.map(jnp.copy, self.params)
         self.global_step = 0
         self.start_generation = 0
         self.gate_failures = 0
@@ -101,7 +103,8 @@ class Trainer:
         return {"params": self.params, "opt_state": self.opt_state,
                 "best_params": self.best_params,
                 "meta": {"generation": np.asarray(self.start_generation),
-                         "global_step": np.asarray(self.global_step)}}
+                         "global_step": np.asarray(self.global_step),
+                         "gate_failures": np.asarray(self.gate_failures)}}
 
     def _maybe_restore(self):
         step = self.mgr.latest_step()
@@ -114,6 +117,7 @@ class Trainer:
         self.best_params = restored["best_params"]
         self.start_generation = int(restored["meta"]["generation"]) + 1
         self.global_step = int(restored["meta"]["global_step"])
+        self.gate_failures = int(restored["meta"]["gate_failures"])
         self._last_saved_gen = int(restored["meta"]["generation"])
 
     def _save(self, generation: int):
@@ -173,7 +177,7 @@ class Trainer:
                                    cfg, seed=cfg.seed + gen)
                 row["gate_score"] = score
                 if score >= cfg.gating.promote_threshold:
-                    self.best_params = self.params
+                    self.best_params = jax.tree.map(jnp.copy, self.params)
                     self.gate_failures = 0
                     self._save_best()
                 else:
