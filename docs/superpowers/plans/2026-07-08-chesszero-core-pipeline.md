@@ -1226,7 +1226,7 @@ git commit -m "feat: selfplay worker with resignation, holdout, example emission
 - Consumes: `ChessNet` (Task 3), batch dict format (Task 4), `TrainConfig` (Task 1).
 - Produces:
   - `make_optimizer(cfg: TrainConfig) -> optax.GradientTransformation` (clip → adamw, warmup-then-constant LR).
-  - `make_train_step(net, tx, cfg: TrainConfig)` → jitted `train_step(params, opt_state, batch) -> (params, opt_state, metrics)` where `metrics = {"loss","policy_loss","wdl_loss","ml_loss"}` (fp32 scalars) and `batch` values are jnp arrays as produced by `ReplayBuffer.sample`.
+  - `make_train_step(net, tx, cfg: TrainConfig)` → jitted `train_step(params, opt_state, batch) -> (params, opt_state, metrics)` where `metrics = {"loss","policy_loss","wdl_loss","ml_loss"}` (fp32 scalars) and `batch` values are jnp arrays as produced by `ReplayBuffer.sample`. NOTE: `train_step` donates its params/opt_state input buffers — callers must rebind both from the return value and never reuse the donated inputs (the Task 9 Trainer does this).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1263,22 +1263,33 @@ def _setup():
 
 def test_loss_finite_and_grads_flow():
     params, opt_state, step, batch = _setup()
+    # train_step donates params/opt_state buffers, so diff against a copy.
+    params0 = jax.tree.map(jnp.copy, params)
     params2, opt_state2, m = step(params, opt_state, batch)
     for k in ("loss", "policy_loss", "wdl_loss", "ml_loss"):
         assert np.isfinite(float(m[k])), k
+    # The first update is a no-op (lr warms up from 0 at optimizer count 0),
+    # so take a second step before checking that parameters actually move.
+    params2, opt_state2, m = step(params2, opt_state2, batch)
     diffs = jax.tree.map(lambda a, b: float(jnp.abs(a - b).max()),
-                         params, params2)
+                         params0, params2)
     assert max(jax.tree.leaves(diffs)) > 0  # something actually updated
 
 
 def test_overfits_fixed_batch():
     params, opt_state, step, batch = _setup()
+    # Policy CE is lower-bounded by the entropy of the dense random targets
+    # (~8.26 nats here), so measure decrease on the reducible excess above it.
+    pol = np.asarray(batch["policy"])
+    mask = np.asarray(batch["has_policy"])
+    ent = float(-(pol * np.log(pol)).sum(-1)[mask].mean())
     first = None
     for i in range(60):
         params, opt_state, m = step(params, opt_state, batch)
         if first is None:
             first = float(m["loss"])
-    assert float(m["loss"]) < first * 0.8  # clearly decreasing on a fixed batch
+    # clearly decreasing on a fixed batch
+    assert float(m["loss"]) - ent < (first - ent) * 0.8
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
