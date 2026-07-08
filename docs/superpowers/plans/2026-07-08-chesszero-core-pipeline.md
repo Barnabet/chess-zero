@@ -16,7 +16,7 @@
   - Black-to-move positions are rank-flipped: flip squares with `(sq // 8) * 8 + (7 - sq % 8)` before/after encoding.
   - Planes 0–8 = underpromotions: `plane // 3` ∈ {0: Rook, 1: Bishop, 2: Knight}; `plane % 3` ∈ {0: straight, 1: right-capture, 2: left-capture} from mover's view. Planes 9–72 = all other moves incl. queen promotions, via pgx's `TO_PLANE`/`FROM_PLANE` tables.
   - Observation: shape (8, 8, 119) float32, current-player perspective; axis 0 = row with **row 0 = mover's 8th rank** (printed-board order), axis 1 = col = file a..h. Verified: at startpos, mover's pawns occupy row 6, back rank row 7.
-  - `State._from_fen(fen)` / `state._to_fen()` exist and round-trip exactly. `MAX_TERMINATION_STEPS = 512`; truncated games have zero rewards (treat as draw).
+  - `pgx.experimental.chess.from_fen(fen)` / `pgx.experimental.chess.to_fen(state)` round-trip FENs exactly and emit no warnings (do NOT use the deprecated `State._from_fen`/`state._to_fen`, which spam DeprecationWarnings; the experimental module is stable at our pinned pgx==2.6.0). `MAX_TERMINATION_STEPS = 512`; truncated games have zero rewards (treat as draw).
   - Stepping an already-terminated state inside search is safe (pgx keeps it terminated, zero rewards); mctx handles terminals via `discount=0`.
 - Only `bridge.py` may know pgx↔python-chess encoding facts. Only `buffer.py` owns storage dtypes. All randomness derives from config seed — no wall-clock seeding.
 - **GPU sharing:** first lines of `train.py` set `os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.70")` **before importing jax**. Any concurrently-launched second JAX process (eval, engine demo) must run with `XLA_PYTHON_CLIENT_MEM_FRACTION=0.15`. Never launch two default-allocation JAX processes together.
@@ -289,6 +289,7 @@ import random
 
 import chess
 import numpy as np
+import pytest
 
 from chesszero import bridge
 
@@ -324,6 +325,7 @@ def test_fixed_positions_exact():
         _assert_position_matches(chess.Board(fen))
 
 
+@pytest.mark.slow          # ~70s: pgx from_fen is slow; run via `pytest -m slow`
 def test_random_games_exact():
     rng = random.Random(42)
     for _ in range(2):
@@ -353,13 +355,12 @@ Verified pgx chess v2 facts (see plan Global Constraints):
 from __future__ import annotations
 
 import chess
-import jax
 import numpy as np
 import pgx
 import pgx._src.games.chess as _cg
+import pgx.experimental.chess as _pxc
 
 ENV = pgx.make("chess")
-_STATE_CLS = type(ENV.init(jax.random.PRNGKey(0)))
 
 TO_PLANE = np.asarray(_cg.TO_PLANE)      # (64, 64) -> plane
 FROM_PLANE = np.asarray(_cg.FROM_PLANE)  # (64, 73) -> to-square
@@ -407,17 +408,17 @@ def action_to_move(action: int, board: chess.Board) -> chess.Move:
 def state_from_fen(fen: str):
     """pgx State from FEN. History planes are empty — for play, prefer
     stepping the env move-by-move (engine does this)."""
-    return _STATE_CLS._from_fen(fen)
+    return _pxc.from_fen(fen)
 
 
 def fen_from_state(state) -> str:
-    return state._to_fen()
+    return _pxc.to_fen(state)
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `pytest tests/test_bridge.py -v`
-Expected: 3 passed (test_random_games_exact takes ~1–2 min: `_from_fen` is slow; that's fine, it's test-only)
+Run: `pytest tests/test_bridge.py -v && pytest tests/test_bridge.py -m slow -v`
+Expected: first command 2 passed / 1 deselected; second command 1 passed in ~1–2 min (pgx `from_fen` is slow; that's fine, it's test-only). Zero warnings in both.
 
 - [ ] **Step 5: Commit**
 
