@@ -15,4 +15,6 @@ gating: {games: 120, promote_threshold: 0.53}
 seed: 0
 run_dir: runs/v1
 checkpoint_every_min: 15.0
-gate_every_generations: 10
+# measured: steady-state gate ~131s worst-case, generation ~18s -> 50 gens
+# keeps gating near the spec's ~13% overhead and aligns with checkpoints
+gate_every_generations: 50
