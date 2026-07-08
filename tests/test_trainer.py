@@ -17,6 +17,35 @@ def cfg(tmp_path):
     return c
 
 
+def test_make_lr_schedule_warmup_then_constant():
+    from chesszero.config import TrainConfig
+    from chesszero.train import make_lr_schedule
+    s = make_lr_schedule(TrainConfig(lr=1e-3, warmup_steps=100))
+    assert float(s(0)) == 0.0
+    assert float(s(50)) == pytest.approx(5e-4)
+    assert float(s(100)) == pytest.approx(1e-3)
+    assert float(s(10_000)) == pytest.approx(1e-3)
+
+
+def test_format_gen_line_fill_and_train_shapes():
+    from chesszero.train import format_gen_line
+    fill = {"gen": 3, "global_step": 0, "buffer_size": 45_000, "games": 0,
+            "resigns": 0, "draws": 0, "avg_len": None,
+            "moves_per_s": 1042.0, "gen_seconds": 31.4}
+    line = format_gen_line(fill, min_buffer=100_000)
+    assert "45.0k/100.0k filling" in line
+    assert "0 games finished" in line and "1042 mv/s" in line
+
+    train = dict(fill, gen=42, global_step=5376, buffer_size=481_000,
+                 games=512, draws=160, resigns=61, avg_len=87.2,
+                 loss=2.314, policy_loss=1.802, wdl_loss=0.401,
+                 ml_loss=0.111, lr=2e-4)
+    line = format_gen_line(train, min_buffer=100_000)
+    assert "loss 2.314" in line and "pi 1.802" in line
+    assert "31% draw" in line and "12% resign" in line
+    assert "lr 2.0e-04" in line and "filling" not in line
+
+
 def test_resign_fp_alarm_thresholds():
     from chesszero.train import resign_fp_alarm
     assert resign_fp_alarm(0, 0) is None      # no data

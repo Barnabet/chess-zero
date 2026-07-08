@@ -14,14 +14,17 @@ import optax
 from chesszero.config import TrainConfig
 
 
-def make_optimizer(cfg: TrainConfig) -> optax.GradientTransformation:
-    schedule = optax.join_schedules(
+def make_lr_schedule(cfg: TrainConfig) -> optax.Schedule:
+    return optax.join_schedules(
         [optax.linear_schedule(0.0, cfg.lr, cfg.warmup_steps),
          optax.constant_schedule(cfg.lr)],
         boundaries=[cfg.warmup_steps])
+
+
+def make_optimizer(cfg: TrainConfig) -> optax.GradientTransformation:
     return optax.chain(
         optax.clip_by_global_norm(cfg.grad_clip_norm),
-        optax.adamw(schedule, weight_decay=cfg.weight_decay))
+        optax.adamw(make_lr_schedule(cfg), weight_decay=cfg.weight_decay))
 
 
 def make_train_step(net, tx, cfg: TrainConfig):
@@ -79,6 +82,36 @@ def resign_fp_alarm(fp_total: int, n_total: int, *,
     return None
 
 
+def _human(n: float) -> str:
+    if n >= 1e6:
+        return f"{n / 1e6:.2f}M"
+    if n >= 1e3:
+        return f"{n / 1e3:.1f}k"
+    return f"{int(n)}"
+
+
+def format_gen_line(row: dict, min_buffer: int) -> str:
+    """One terminal line per generation; the row dict is the metrics.jsonl row.
+    Two shapes: buffer-fill (no gradient steps yet) and training."""
+    if "loss" in row:
+        buf = f"buf {_human(row['buffer_size'])}"
+        train = (f"loss {row['loss']:.3f} (pi {row['policy_loss']:.3f}"
+                 f" wdl {row['wdl_loss']:.3f} ml {row['ml_loss']:.3f})"
+                 f" | lr {row['lr']:.1e}")
+    else:
+        buf = f"buf {_human(row['buffer_size'])}/{_human(min_buffer)} filling"
+        train = "no training yet"
+    if row["games"]:
+        g = (f"{row['games']} games {100 * row['draws'] / row['games']:.0f}% draw"
+             f" {100 * row['resigns'] / row['games']:.0f}% resign"
+             f" len {row['avg_len']:.0f}")
+    else:
+        g = "0 games finished"
+    return (f"gen {row['gen']:>5} | step {row['global_step']:>6} | {buf}"
+            f" | {row['moves_per_s']:.0f} mv/s | {train} | {g}"
+            f" | {row['gen_seconds']:.1f}s")
+
+
 class Trainer:
     def __init__(self, cfg: Config):
         self.cfg = cfg
@@ -99,6 +132,9 @@ class Trainer:
         self.holdout_fp_total = 0
         self.holdout_n_total = 0
         self._last_saved_gen = -1
+        self._lr_schedule = make_lr_schedule(cfg.train)
+        self._t0 = time.time()
+        self._fp_alarm_active = False
 
         self.mgr = ocp.CheckpointManager(
             (self.run_dir / "ckpts").absolute(),
@@ -142,6 +178,7 @@ class Trainer:
         self.start_generation = generation
         self.mgr.save(generation, args=ocp.args.StandardSave(self._payload()))
         self._last_saved_gen = generation
+        self._log(f"checkpoint saved @ gen {generation}")
 
     def _save_best(self):
         best_dir = (self.run_dir / "best").absolute()
@@ -150,17 +187,46 @@ class Trainer:
         with ocp.StandardCheckpointer() as ckptr:
             ckptr.save(best_dir, self.best_params, force=True)
 
+    # -- terminal feedback ---------------------------------------------------
+    def _log(self, msg: str):
+        up = (time.time() - self._t0) / 3600
+        print(f"{time.strftime('%H:%M:%S')} t+{up:5.2f}h  {msg}", flush=True)
+
+    def _log_banner(self):
+        cfg = self.cfg
+        n_params = sum(x.size for x in jax.tree.leaves(self.params))
+        self._log(
+            f"ChessZero | net {cfg.net.blocks}x{cfg.net.channels}"
+            f" ({_human(n_params)} params)"
+            f" | selfplay {cfg.selfplay.num_games} games x"
+            f" {cfg.selfplay.steps_per_generation} steps/gen,"
+            f" sims {cfg.selfplay.sims_full}/{cfg.selfplay.sims_cheap}"
+            f" | train batch {cfg.train.batch_size} x"
+            f" {cfg.train.steps_per_generation} steps/gen")
+        self._log(
+            f"device {jax.devices()[0].device_kind} | run {self.run_dir}"
+            f" | buffer min {_human(cfg.train.min_buffer)}"
+            f" cap {_human(cfg.train.buffer_capacity)}"
+            f" | gate every {cfg.gate_every_generations} gens"
+            f" | ckpt every {cfg.checkpoint_every_min:g} min")
+        if self.start_generation > 0:
+            self._log(f"resumed from checkpoint: gen {self.start_generation},"
+                      f" global step {self.global_step}"
+                      f" (buffer restarts empty)")
+
     # -- main loop -----------------------------------------------------------
     def run(self, max_generations: int | None = None):
         cfg = self.cfg
         target = max_generations if max_generations is not None \
             else cfg.max_generations
+        self._log_banner()
         last_ckpt = time.time()
         for gen in range(self.start_generation, target):
             t0 = time.time()
             allow_resign = self.global_step >= cfg.train.resign_min_train_steps
             examples, stats = self.worker.run_generation(self.params,
                                                          allow_resign)
+            sp_seconds = time.time() - t0
             self.holdout_fp_total += stats.holdout_false_positives
             self.holdout_n_total += stats.holdout_resign_games
             if examples:
@@ -170,14 +236,19 @@ class Trainer:
                 if not hasattr(self, "_train_step"):
                     self._train_step = make_train_step(self.net, self.tx,
                                                        cfg.train)
+                step_metrics = []
                 for _ in range(cfg.train.steps_per_generation):
                     batch = {k: jnp.asarray(v) for k, v in
                              self.buffer.sample(cfg.train.batch_size).items()}
                     self.params, self.opt_state, m = self._train_step(
                         self.params, self.opt_state, batch)
                     self.global_step += 1
-                metrics = {k: float(v) for k, v in m.items()}
+                    step_metrics.append(m)
+                metrics = {k: float(np.mean([sm[k] for sm in step_metrics]))
+                           for k in step_metrics[0]}
+                metrics["lr"] = float(self._lr_schedule(self.global_step))
 
+            moves = cfg.selfplay.num_games * cfg.selfplay.steps_per_generation
             row = {"ts": time.time(), "gen": gen,
                    "global_step": self.global_step,
                    "buffer_size": self.buffer.size,
@@ -187,25 +258,47 @@ class Trainer:
                                if stats.games else None),
                    "holdout_fp": stats.holdout_false_positives,
                    "holdout_n": stats.holdout_resign_games,
+                   "sp_seconds": sp_seconds,
+                   "moves_per_s": moves / sp_seconds,
                    "gen_seconds": time.time() - t0, **metrics}
             fp_rate = resign_fp_alarm(self.holdout_fp_total,
                                       self.holdout_n_total)
             if fp_rate is not None:
                 row["resign_fp_alarm"] = fp_rate
+            self._log(format_gen_line(row, cfg.train.min_buffer))
+            if fp_rate is not None and not self._fp_alarm_active:
+                self._log(f"ALARM resign false-positive rate"
+                          f" {100 * fp_rate:.1f}% (>5% of"
+                          f" {self.holdout_n_total} held-out resign games)"
+                          f" — resign threshold may be unsafe")
+            self._fp_alarm_active = fp_rate is not None
 
             if (gen + 1) % cfg.gate_every_generations == 0 \
                     and self.global_step > 0:
+                gt0 = time.time()
                 score = play_match(self.net, self.params, self.best_params,
                                    cfg, seed=cfg.seed + gen)
                 row["gate_score"] = score
-                if score >= cfg.gating.promote_threshold:
+                promoted = score >= cfg.gating.promote_threshold
+                row["promoted"] = promoted
+                if promoted:
                     self.best_params = jax.tree.map(jnp.copy, self.params)
                     self.gate_failures = 0
                     self._save_best()
+                    self._log(f"GATE gen {gen}: challenger {score:.3f}"
+                              f" vs best -> PROMOTED, new best saved"
+                              f" ({time.time() - gt0:.0f}s)")
                 else:
                     self.gate_failures += 1
+                    self._log(f"GATE gen {gen}: challenger {score:.3f}"
+                              f" vs best -> kept best"
+                              f" (fail {self.gate_failures}/3,"
+                              f" {time.time() - gt0:.0f}s)")
                     if self.gate_failures >= 3:
                         row["alarm"] = "3 consecutive gate failures"
+                        self._log("ALARM 3 consecutive gate failures —"
+                                  " net is not improving; inspect losses"
+                                  " before letting the run continue")
 
             with (self.run_dir / "metrics.jsonl").open("a") as f:
                 f.write(json.dumps(row) + "\n")
