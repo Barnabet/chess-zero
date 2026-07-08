@@ -1,0 +1,29 @@
+[project]
+name = "chesszero"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+  "jax==0.10.2",
+  "pgx==2.6.0",
+  "mctx==0.0.71",
+  "flax==0.12.7",
+  "optax==0.2.8",
+  "orbax-checkpoint==0.12.1",
+  "chess==1.11.2",
+  "pyyaml>=6",
+  "numpy>=2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["chesszero*"]
+
+[tool.pytest.ini_options]
+markers = ["slow: long-running end-to-end tests"]
+addopts = "-m 'not slow'"
