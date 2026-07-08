@@ -1921,6 +1921,7 @@ class Engine:
         self.params = ocp.StandardCheckpointer().restore(
             Path(best_dir).absolute(), template)
         self._search_fns: dict[int, callable] = {}
+        self._step = jax.jit(jax.vmap(ENV.step))  # jit once, not per push_uci
         self.key = jax.random.PRNGKey(0)
         self.sims_per_s: float | None = None
         self.reset()
@@ -1949,6 +1950,8 @@ class Engine:
         return self._search_fns[sims]
 
     def reset(self, fen: str | None = None):
+        """New game. With `fen`, pgx history planes start empty — analysis
+        only; for real play use reset() + push_uci so history stays exact."""
         self.board = chess.Board(fen) if fen else chess.Board()
         if fen:
             self.state = jax.tree.map(lambda x: x[None],
@@ -1959,14 +1962,14 @@ class Engine:
     def push_uci(self, uci: str):
         move = chess.Move.from_uci(uci)
         action = bridge.move_to_action(move, self.board.turn)
-        self.state = jax.jit(jax.vmap(ENV.step))(
-            self.state, jnp.asarray([action]))
+        self.state = self._step(self.state, jnp.asarray([action]))
         self.board.push(move)
 
     def _pick_sims(self, movetime_s: float) -> int:
         if self.sims_per_s is None:
             fn = self._get_search(_SIM_TIERS[0])
-            fn(self.params, self.state, self.key)          # compile
+            jax.block_until_ready(
+                fn(self.params, self.state, self.key))     # compile & sync
             t0 = time.time()
             jax.block_until_ready(fn(self.params, self.state, self.key))
             self.sims_per_s = _SIM_TIERS[0] / max(time.time() - t0, 1e-4)
