@@ -1,0 +1,20 @@
+net: {channels: 128, blocks: 6, se_ratio: 4, precision: bf16}
+selfplay:
+  num_games: 1024
+  sims_full: 32
+  sims_cheap: 8
+  full_search_prob: 0.25
+  steps_per_generation: 16
+train:
+  batch_size: 1024
+  steps_per_generation: 64
+  buffer_capacity: 1000000
+  min_buffer: 100000
+  resign_min_train_steps: 2000
+gating: {games: 120, promote_threshold: 0.53}
+seed: 0
+run_dir: runs/v1
+checkpoint_every_min: 15.0
+# measured: steady-state gate ~131s worst-case, generation ~18s -> 50 gens
+# keeps gating near the spec's ~13% overhead and aligns with checkpoints
+gate_every_generations: 50

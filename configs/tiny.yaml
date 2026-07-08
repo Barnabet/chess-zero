@@ -1,0 +1,20 @@
+net: {channels: 32, blocks: 2, se_ratio: 4, precision: fp32}
+selfplay:
+  num_games: 8
+  sims_full: 8
+  sims_cheap: 4
+  full_search_prob: 0.5
+  steps_per_generation: 32
+  resign_holdout_frac: 0.5
+train:
+  batch_size: 64
+  steps_per_generation: 4
+  buffer_capacity: 10000
+  min_buffer: 256
+  warmup_steps: 10
+  resign_min_train_steps: 20
+gating: {games: 8, promote_threshold: 0.5}
+seed: 7
+run_dir: runs/tiny
+checkpoint_every_min: 0.5
+gate_every_generations: 5

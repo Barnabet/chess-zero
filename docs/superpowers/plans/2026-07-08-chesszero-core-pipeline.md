@@ -16,7 +16,7 @@
   - Black-to-move positions are rank-flipped: flip squares with `(sq // 8) * 8 + (7 - sq % 8)` before/after encoding.
   - Planes 0–8 = underpromotions: `plane // 3` ∈ {0: Rook, 1: Bishop, 2: Knight}; `plane % 3` ∈ {0: straight, 1: right-capture, 2: left-capture} from mover's view. Planes 9–72 = all other moves incl. queen promotions, via pgx's `TO_PLANE`/`FROM_PLANE` tables.
   - Observation: shape (8, 8, 119) float32, current-player perspective; axis 0 = row with **row 0 = mover's 8th rank** (printed-board order), axis 1 = col = file a..h. Verified: at startpos, mover's pawns occupy row 6, back rank row 7.
-  - `State._from_fen(fen)` / `state._to_fen()` exist and round-trip exactly. `MAX_TERMINATION_STEPS = 512`; truncated games have zero rewards (treat as draw).
+  - `pgx.experimental.chess.from_fen(fen)` / `pgx.experimental.chess.to_fen(state)` round-trip FENs exactly and emit no warnings (do NOT use the deprecated `State._from_fen`/`state._to_fen`, which spam DeprecationWarnings; the experimental module is stable at our pinned pgx==2.6.0). `MAX_TERMINATION_STEPS = 512`; truncated games have zero rewards (treat as draw).
   - Stepping an already-terminated state inside search is safe (pgx keeps it terminated, zero rewards); mctx handles terminals via `discount=0`.
 - Only `bridge.py` may know pgx↔python-chess encoding facts. Only `buffer.py` owns storage dtypes. All randomness derives from config seed — no wall-clock seeding.
 - **GPU sharing:** first lines of `train.py` set `os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.70")` **before importing jax**. Any concurrently-launched second JAX process (eval, engine demo) must run with `XLA_PYTHON_CLIENT_MEM_FRACTION=0.15`. Never launch two default-allocation JAX processes together.
@@ -144,8 +144,11 @@ class SelfplayConfig:
     full_search_prob: float = 0.25    # fraction of steps run at sims_full
     max_considered_actions: int = 16  # Gumbel root candidates
     steps_per_generation: int = 16    # env steps (all slots) per generation
-    resign_threshold: float = 0.95    # resign when mover E[value] < -threshold…
-    resign_consecutive_plies: int = 4 # …for this many consecutive plies
+    resign_threshold: float = 0.95     # resign when mover E[value] < -threshold…
+    resign_consecutive_moves: int = 2  # …on this many consecutive OWN moves
+                                       # (per-player counter — values are
+                                       # mover-relative and alternate sign, so a
+                                       # shared ply counter would never trip)
     resign_holdout_frac: float = 0.10 # games that never resign (FP measurement)
 
 
@@ -248,7 +251,9 @@ gating: {games: 120, promote_threshold: 0.53}
 seed: 0
 run_dir: runs/v1
 checkpoint_every_min: 15.0
-gate_every_generations: 10
+# measured: steady-state gate ~131s worst-case, generation ~18s -> 50 gens
+# keeps gating near the spec's ~13% overhead and aligns with checkpoints
+gate_every_generations: 50
 ```
 
 - [ ] **Step 4: Install editable and run tests**
@@ -289,6 +294,7 @@ import random
 
 import chess
 import numpy as np
+import pytest
 
 from chesszero import bridge
 
@@ -324,6 +330,7 @@ def test_fixed_positions_exact():
         _assert_position_matches(chess.Board(fen))
 
 
+@pytest.mark.slow          # ~70s: pgx from_fen is slow; run via `pytest -m slow`
 def test_random_games_exact():
     rng = random.Random(42)
     for _ in range(2):
@@ -353,13 +360,12 @@ Verified pgx chess v2 facts (see plan Global Constraints):
 from __future__ import annotations
 
 import chess
-import jax
 import numpy as np
 import pgx
 import pgx._src.games.chess as _cg
+import pgx.experimental.chess as _pxc
 
 ENV = pgx.make("chess")
-_STATE_CLS = type(ENV.init(jax.random.PRNGKey(0)))
 
 TO_PLANE = np.asarray(_cg.TO_PLANE)      # (64, 64) -> plane
 FROM_PLANE = np.asarray(_cg.FROM_PLANE)  # (64, 73) -> to-square
@@ -407,17 +413,17 @@ def action_to_move(action: int, board: chess.Board) -> chess.Move:
 def state_from_fen(fen: str):
     """pgx State from FEN. History planes are empty — for play, prefer
     stepping the env move-by-move (engine does this)."""
-    return _STATE_CLS._from_fen(fen)
+    return _pxc.from_fen(fen)
 
 
 def fen_from_state(state) -> str:
-    return state._to_fen()
+    return _pxc.to_fen(state)
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `pytest tests/test_bridge.py -v`
-Expected: 3 passed (test_random_games_exact takes ~1–2 min: `_from_fen` is slow; that's fine, it's test-only)
+Run: `pytest tests/test_bridge.py -v && pytest tests/test_bridge.py -m slow -v`
+Expected: first command 2 passed / 1 deselected; second command 1 passed in ~1–2 min (pgx `from_fen` is slow; that's fine, it's test-only). Zero warnings in both.
 
 - [ ] **Step 5: Commit**
 
@@ -823,10 +829,11 @@ from chesszero.net import value_from_wdl
 
 ENV = pgx.make("chess")
 
+_JIT_INIT = jax.jit(jax.vmap(ENV.init))  # jit once; retraces only per new n
+
 
 def init_batch(n: int, seed: int):
-    keys = jax.random.split(jax.random.PRNGKey(seed), n)
-    return jax.jit(jax.vmap(ENV.init))(keys)
+    return _JIT_INIT(jax.random.split(jax.random.PRNGKey(seed), n))
 
 
 def net_forward(net, params, obs, legal_mask):
@@ -983,9 +990,46 @@ def test_flush_emits_correct_targets():
     assert len(w.slots[0].obs) == 0                      # slot recycled
 
 
+def _record(movers, values):
+    """Synthetic single-step device record for host-logic tests."""
+    n = len(movers)
+    return {
+        "obs": np.zeros((n, 8, 8, 119), np.float16),
+        "action_weights": np.full((n, 4672), 1 / 4672, np.float16),
+        "action": np.zeros(n, np.int64),
+        "root_value": np.asarray(values, np.float32),
+        "mover": np.asarray(movers, np.int64),
+        "rewards": np.zeros((n, 2), np.float32),
+        "done": np.zeros(n, bool),
+    }
+
+
+def test_resign_counter_is_per_player():
+    cfg = _tiny_cfg(num_games=1, resign_threshold=0.9, resign_consecutive_moves=2)
+    w, _ = _worker(cfg)
+    examples, stats = [], GenStats()
+    # decided game: player 0 hopeless on own moves, player 1 confident on theirs
+    for mover, val in [(0, -0.95), (1, 0.95)]:
+        w._process(_record([mover], [val]), True, True, examples, stats)
+    assert stats.resigns == 0            # one bad own-move is not enough
+    w._process(_record([0], [-0.95]), True, True, examples, stats)
+    assert stats.resigns == 1            # 2nd consecutive bad own-move trips
+    assert [e.wdl for e in examples] == [2, 0, 2]  # loser L, winner W, loser L
+
+
+def test_resign_counter_resets_on_recovery():
+    cfg = _tiny_cfg(num_games=1, resign_threshold=0.9, resign_consecutive_moves=2)
+    w, _ = _worker(cfg)
+    examples, stats = [], GenStats()
+    seq = [(0, -0.95), (1, 0.95), (0, 0.0), (1, 0.95), (0, -0.95)]
+    for mover, val in seq:
+        w._process(_record([mover], [val]), True, True, examples, stats)
+    assert stats.resigns == 0            # recovery at ply 3 reset player 0's count
+
+
 def test_resignation_forces_loss():
-    cfg = _tiny_cfg(resign_threshold=-1.1,  # value always > -(-1.1) -> trip instantly
-                    resign_consecutive_plies=2, steps_per_generation=4)
+    cfg = _tiny_cfg(resign_threshold=-1.1,  # -thr = +1.1: every value < 1.1 is "hopeless"
+                    resign_consecutive_moves=2, steps_per_generation=4)
     w, params = _worker(cfg)
     examples, stats = w.run_generation(params, allow_resign=True)
     assert stats.resigns >= 1                            # games got adjudicated
@@ -1046,7 +1090,7 @@ class _Slot:
     weights: list = field(default_factory=list)      # per-ply f16 array or None
     mover: list = field(default_factory=list)
     root_value: list = field(default_factory=list)
-    resign_count: int = 0
+    resign_counts: list = field(default_factory=lambda: [0, 0])  # per player id
     resign_would_have: int = -1                      # 1-based ply, -1 = never
     holdout: bool = False
 
@@ -1112,24 +1156,26 @@ class SelfplayWorker:
         new_reset = np.zeros(self.n, bool)
         for i in range(self.n):
             slot = self.slots[i]
+            p = int(movers[i])
             slot.obs.append(obs[i])
             slot.weights.append(weights[i] if full else None)
-            slot.mover.append(int(movers[i]))
+            slot.mover.append(p)
             slot.root_value.append(float(values[i]))
+            # per-player counter: values are mover-relative, so only player
+            # p's own moves speak to whether p should resign
             if float(values[i]) < -sp.resign_threshold:
-                slot.resign_count += 1
+                slot.resign_counts[p] += 1
             else:
-                slot.resign_count = 0
-            tripped = slot.resign_count >= sp.resign_consecutive_plies
+                slot.resign_counts[p] = 0
+            tripped = slot.resign_counts[p] >= sp.resign_consecutive_moves
             if tripped and slot.resign_would_have < 0:
                 slot.resign_would_have = len(slot.obs)
             if done[i]:
                 self._flush(i, rewards[i], examples, stats, resigned=False)
                 new_reset[i] = True
             elif allow_resign and tripped and not slot.holdout:
-                loser = int(movers[i])
                 fake = np.zeros(2, np.float32)
-                fake[loser], fake[1 - loser] = -1.0, 1.0
+                fake[p], fake[1 - p] = -1.0, 1.0
                 self._flush(i, fake, examples, stats, resigned=True)
                 new_reset[i] = True
         self.reset_mask = new_reset
@@ -1162,7 +1208,7 @@ Note the ordering contract with Task 5: `reset_mask` slots are replaced with fre
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `pytest tests/test_selfplay_worker.py -v`
-Expected: 4 passed (~1–2 min, includes compiles)
+Expected: 6 passed (~1–2 min, includes compiles)
 
 - [ ] **Step 5: Commit**
 
@@ -1183,7 +1229,7 @@ git commit -m "feat: selfplay worker with resignation, holdout, example emission
 - Consumes: `ChessNet` (Task 3), batch dict format (Task 4), `TrainConfig` (Task 1).
 - Produces:
   - `make_optimizer(cfg: TrainConfig) -> optax.GradientTransformation` (clip → adamw, warmup-then-constant LR).
-  - `make_train_step(net, tx, cfg: TrainConfig)` → jitted `train_step(params, opt_state, batch) -> (params, opt_state, metrics)` where `metrics = {"loss","policy_loss","wdl_loss","ml_loss"}` (fp32 scalars) and `batch` values are jnp arrays as produced by `ReplayBuffer.sample`.
+  - `make_train_step(net, tx, cfg: TrainConfig)` → jitted `train_step(params, opt_state, batch) -> (params, opt_state, metrics)` where `metrics = {"loss","policy_loss","wdl_loss","ml_loss"}` (fp32 scalars) and `batch` values are jnp arrays as produced by `ReplayBuffer.sample`. NOTE: `train_step` donates its params/opt_state input buffers — callers must rebind both from the return value and never reuse the donated inputs (the Task 9 Trainer does this).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1220,22 +1266,33 @@ def _setup():
 
 def test_loss_finite_and_grads_flow():
     params, opt_state, step, batch = _setup()
+    # train_step donates params/opt_state buffers, so diff against a copy.
+    params0 = jax.tree.map(jnp.copy, params)
     params2, opt_state2, m = step(params, opt_state, batch)
     for k in ("loss", "policy_loss", "wdl_loss", "ml_loss"):
         assert np.isfinite(float(m[k])), k
+    # The first update is a no-op (lr warms up from 0 at optimizer count 0),
+    # so take a second step before checking that parameters actually move.
+    params2, opt_state2, m = step(params2, opt_state2, batch)
     diffs = jax.tree.map(lambda a, b: float(jnp.abs(a - b).max()),
-                         params, params2)
+                         params0, params2)
     assert max(jax.tree.leaves(diffs)) > 0  # something actually updated
 
 
 def test_overfits_fixed_batch():
     params, opt_state, step, batch = _setup()
+    # Policy CE is lower-bounded by the entropy of the dense random targets
+    # (~8.26 nats here), so measure decrease on the reducible excess above it.
+    pol = np.asarray(batch["policy"])
+    mask = np.asarray(batch["has_policy"])
+    ent = float(-(pol * np.log(pol)).sum(-1)[mask].mean())
     first = None
     for i in range(60):
         params, opt_state, m = step(params, opt_state, batch)
         if first is None:
             first = float(m["loss"])
-    assert float(m["loss"]) < first * 0.8  # clearly decreasing on a fixed batch
+    # clearly decreasing on a fixed batch
+    assert float(m["loss"]) - ent < (first - ent) * 0.8
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1431,10 +1488,13 @@ def _make_versus_step(net, sims, max_considered):
             invalid_actions=~state.legal_action_mask,
             max_num_considered_actions=max_considered,
             gumbel_scale=0.0)
-        # opening diversity: sample from improved policy on early plies
-        w = jnp.maximum(out.action_weights, 1e-9)
+        # opening diversity: sample from improved policy on early plies;
+        # illegal actions get -inf so they can never be drawn
+        logw = jnp.where(state.legal_action_mask,
+                         jnp.log(jnp.maximum(out.action_weights, 1e-9)),
+                         -jnp.inf)
         sampled = jax.random.categorical(
-            k_sample, jnp.log(w) / temperature, axis=-1)
+            k_sample, logw / temperature, axis=-1)
         action = jnp.where(temperature_mask, sampled, out.action)
         next_state = jax.vmap(ENV.step)(state, action)
         # freeze finished games: keep terminal state, don't step it
@@ -1448,6 +1508,20 @@ def _make_versus_step(net, sims, max_considered):
     return versus_step
 
 
+_VERSUS_CACHE: dict = {}
+
+
+def _get_versus_step(net, sims, max_considered):
+    """Cache jitted versus steps — a fresh jit per gate would re-XLA-compile
+    the whole two-net search graph every gate (~180x over a 24h run). Keyed
+    by id(net): valid while the caller keeps one net instance alive per
+    process, which the Trainer does."""
+    key = (id(net), sims, max_considered)
+    if key not in _VERSUS_CACHE:
+        _VERSUS_CACHE[key] = _make_versus_step(net, sims, max_considered)
+    return _VERSUS_CACHE[key]
+
+
 def play_match(net, params_a, params_b, cfg: Config, seed: int = 0) -> float:
     g = cfg.gating
     n = g.games
@@ -1457,8 +1531,8 @@ def play_match(net, params_a, params_b, cfg: Config, seed: int = 0) -> float:
     a_white = np.arange(n) < n // 2
     a_player = jnp.asarray(np.where(a_white, white_id, 1 - white_id))
     params = {"a": params_a, "b": params_b, "a_player": a_player}
-    step = _make_versus_step(net, cfg.selfplay.sims_full,
-                             cfg.selfplay.max_considered_actions)
+    step = _get_versus_step(net, cfg.selfplay.sims_full,
+                            cfg.selfplay.max_considered_actions)
     key = jax.random.PRNGKey(seed * 2 + 1)
     ply = 0
     while True:
@@ -1524,6 +1598,14 @@ def cfg(tmp_path):
     return c
 
 
+def test_resign_fp_alarm_thresholds():
+    from chesszero.train import resign_fp_alarm
+    assert resign_fp_alarm(0, 0) is None      # no data
+    assert resign_fp_alarm(5, 19) is None     # below min_n
+    assert resign_fp_alarm(1, 20) is None     # exactly 5%: not exceeded
+    assert resign_fp_alarm(2, 20) == 0.1      # tripped
+
+
 @pytest.mark.slow
 def test_train_checkpoint_resume(cfg):
     t = Trainer(cfg)
@@ -1539,7 +1621,33 @@ def test_train_checkpoint_resume(cfg):
     assert t2.start_generation == 3
     t2.run(max_generations=5)
     lines = [json.loads(l) for l in (run / "metrics.jsonl").read_text().splitlines()]
-    assert lines[-1]["gen"] == 4
+    assert lines[-1]["gen"] == 4 and len(lines) == 5
+
+
+@pytest.mark.slow
+def test_training_gating_checkpoint_after_donation(cfg):
+    """Force the training path (buffer pre-seeded past min_buffer) so the
+    donation-sensitive best_params/checkpoint/gating code actually executes.
+    Catches aliasing of donated buffers, which the organic 3-gen run cannot
+    reach (games don't finish that fast)."""
+    import numpy as np
+
+    from chesszero.selfplay import Example, pack_examples
+
+    cfg.gate_every_generations = 2      # gate fires at gen 1
+    t = Trainer(cfg)
+    exs = [Example(np.zeros((8, 8, 119), np.float16),
+                   np.full(4672, 1 / 4672, np.float16) if i % 2 == 0 else None,
+                   i % 3, 10)
+           for i in range(cfg.train.min_buffer + 64)]
+    t.buffer.add(*pack_examples(exs))
+    t.run(max_generations=2)            # trains, checkpoints, gates — no crash
+    run = pathlib.Path(cfg.run_dir)
+    lines = [json.loads(l) for l in (run / "metrics.jsonl").read_text().splitlines()]
+    assert "policy_loss" in lines[-1]                 # training fired
+    assert any("gate_score" in l for l in lines)      # gating fired
+    t2 = Trainer(cfg)                                 # checkpoint is loadable
+    assert t2.start_generation == 2 and t2.global_step > 0
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1568,6 +1676,16 @@ from chesszero.net import ChessNet
 from chesszero.selfplay import SelfplayWorker, pack_examples
 
 
+def resign_fp_alarm(fp_total: int, n_total: int, *,
+                    threshold: float = 0.05, min_n: int = 20) -> "float | None":
+    """Spec §5 alarm: fraction of held-out would-resign games that were NOT
+    actually lost. Returns the rate when it exceeds threshold with enough
+    samples, else None."""
+    if n_total >= min_n and fp_total > threshold * n_total:
+        return round(fp_total / n_total, 3)
+    return None
+
+
 class Trainer:
     def __init__(self, cfg: Config):
         self.cfg = cfg
@@ -1579,10 +1697,14 @@ class Trainer:
         self.params = self.net.init(key, dummy)
         self.tx = make_optimizer(cfg.train)
         self.opt_state = self.tx.init(self.params)
-        self.best_params = self.params
+        # deep copy — train_step donates params buffers; an alias here would
+        # be deleted by the first gradient step and crash the next save/gate
+        self.best_params = jax.tree.map(jnp.copy, self.params)
         self.global_step = 0
         self.start_generation = 0
         self.gate_failures = 0
+        self.holdout_fp_total = 0
+        self.holdout_n_total = 0
         self._last_saved_gen = -1
 
         self.mgr = ocp.CheckpointManager(
@@ -1600,7 +1722,10 @@ class Trainer:
         return {"params": self.params, "opt_state": self.opt_state,
                 "best_params": self.best_params,
                 "meta": {"generation": np.asarray(self.start_generation),
-                         "global_step": np.asarray(self.global_step)}}
+                         "global_step": np.asarray(self.global_step),
+                         "gate_failures": np.asarray(self.gate_failures),
+                         "holdout_fp_total": np.asarray(self.holdout_fp_total),
+                         "holdout_n_total": np.asarray(self.holdout_n_total)}}
 
     def _maybe_restore(self):
         step = self.mgr.latest_step()
@@ -1613,6 +1738,9 @@ class Trainer:
         self.best_params = restored["best_params"]
         self.start_generation = int(restored["meta"]["generation"]) + 1
         self.global_step = int(restored["meta"]["global_step"])
+        self.gate_failures = int(restored["meta"]["gate_failures"])
+        self.holdout_fp_total = int(restored["meta"]["holdout_fp_total"])
+        self.holdout_n_total = int(restored["meta"]["holdout_n_total"])
         self._last_saved_gen = int(restored["meta"]["generation"])
 
     def _save(self, generation: int):
@@ -1624,8 +1752,10 @@ class Trainer:
 
     def _save_best(self):
         best_dir = (self.run_dir / "best").absolute()
-        ocp.StandardCheckpointer().save(
-            best_dir, args=ocp.args.StandardSave(self.best_params), force=True)
+        # orbax 0.12 StandardCheckpointer takes the state positionally and
+        # saves asynchronously; the context manager waits before returning.
+        with ocp.StandardCheckpointer() as ckptr:
+            ckptr.save(best_dir, self.best_params, force=True)
 
     # -- main loop -----------------------------------------------------------
     def run(self, max_generations: int | None = None):
@@ -1638,6 +1768,8 @@ class Trainer:
             allow_resign = self.global_step >= cfg.train.resign_min_train_steps
             examples, stats = self.worker.run_generation(self.params,
                                                          allow_resign)
+            self.holdout_fp_total += stats.holdout_false_positives
+            self.holdout_n_total += stats.holdout_resign_games
             if examples:
                 self.buffer.add(*pack_examples(examples))
             metrics = {}
@@ -1663,6 +1795,10 @@ class Trainer:
                    "holdout_fp": stats.holdout_false_positives,
                    "holdout_n": stats.holdout_resign_games,
                    "gen_seconds": time.time() - t0, **metrics}
+            fp_rate = resign_fp_alarm(self.holdout_fp_total,
+                                      self.holdout_n_total)
+            if fp_rate is not None:
+                row["resign_fp_alarm"] = fp_rate
 
             if (gen + 1) % cfg.gate_every_generations == 0 \
                     and self.global_step > 0:
@@ -1670,7 +1806,7 @@ class Trainer:
                                    cfg, seed=cfg.seed + gen)
                 row["gate_score"] = score
                 if score >= cfg.gating.promote_threshold:
-                    self.best_params = self.params
+                    self.best_params = jax.tree.map(jnp.copy, self.params)
                     self.gate_failures = 0
                     self._save_best()
                 else:
@@ -1703,6 +1839,7 @@ if __name__ == "__main__":
 
 Careful points the implementer must preserve:
 - `_maybe_restore` builds the abstract tree from `self._payload()` — params/opt_state templates must be constructed *before* restore (they are: `__init__` inits them first).
+- `best_params` must NEVER alias `self.params` (`jax.tree.map(jnp.copy, ...)` at both assignment sites): `train_step` donates the params buffers, so an alias is deleted by the first gradient step and the next `_save`/`play_match` crashes with "Array has been deleted".
 - `_save(gen)` sets `start_generation = gen` so the payload's meta is current; restore adds +1.
 - Orbax steps must be unique and monotonically increasing: `_save` keys checkpoints by generation and the `_last_saved_gen` guard makes duplicate or regressive saves (e.g. the trailing `_save` after a no-op resume, or re-running with a smaller `--generations`) a silent no-op. `_maybe_restore` must set `_last_saved_gen` to the restored generation.
 - Buffer restarts empty on resume by design (spec §6); `min_buffer` gates training until refilled.
@@ -1710,7 +1847,7 @@ Careful points the implementer must preserve:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `timeout 900 pytest tests/test_trainer.py -v -m slow`
-Expected: 1 passed (tiny config; a few minutes on the 4090)
+Expected: 2 passed (tiny config; a few minutes on the 4090)
 
 - [ ] **Step 5: Commit**
 
@@ -1756,8 +1893,8 @@ def engine(tmp_path_factory):
     net = ChessNet(cfg.net)
     params = net.init(jax.random.PRNGKey(0), jnp.zeros((1, 8, 8, 119)))
     best = tmp_path_factory.mktemp("ck") / "best"
-    ocp.StandardCheckpointer().save(
-        best.absolute(), args=ocp.args.StandardSave(params), force=True)
+    with ocp.StandardCheckpointer() as ckptr:
+        ckptr.save(best.absolute(), params, force=True)
     return Engine(best, cfg)
 
 
@@ -1830,9 +1967,11 @@ class Engine:
         self.net = ChessNet(cfg.net)
         template = self.net.init(jax.random.PRNGKey(0),
                                  jnp.zeros((1, 8, 8, 119), jnp.float32))
+        # orbax 0.12 StandardCheckpointer: positional target, no args= kwarg
         self.params = ocp.StandardCheckpointer().restore(
-            Path(best_dir).absolute(), args=ocp.args.StandardRestore(template))
+            Path(best_dir).absolute(), template)
         self._search_fns: dict[int, callable] = {}
+        self._step = jax.jit(jax.vmap(ENV.step))  # jit once, not per push_uci
         self.key = jax.random.PRNGKey(0)
         self.sims_per_s: float | None = None
         self.reset()
@@ -1861,6 +2000,8 @@ class Engine:
         return self._search_fns[sims]
 
     def reset(self, fen: str | None = None):
+        """New game. With `fen`, pgx history planes start empty — analysis
+        only; for real play use reset() + push_uci so history stays exact."""
         self.board = chess.Board(fen) if fen else chess.Board()
         if fen:
             self.state = jax.tree.map(lambda x: x[None],
@@ -1871,14 +2012,14 @@ class Engine:
     def push_uci(self, uci: str):
         move = chess.Move.from_uci(uci)
         action = bridge.move_to_action(move, self.board.turn)
-        self.state = jax.jit(jax.vmap(ENV.step))(
-            self.state, jnp.asarray([action]))
+        self.state = self._step(self.state, jnp.asarray([action]))
         self.board.push(move)
 
     def _pick_sims(self, movetime_s: float) -> int:
         if self.sims_per_s is None:
             fn = self._get_search(_SIM_TIERS[0])
-            fn(self.params, self.state, self.key)          # compile
+            jax.block_until_ready(
+                fn(self.params, self.state, self.key))     # compile & sync
             t0 = time.time()
             jax.block_until_ready(fn(self.params, self.state, self.key))
             self.sims_per_s = _SIM_TIERS[0] / max(time.time() - t0, 1e-4)
@@ -1940,12 +2081,16 @@ echo "=== [3/3] kill -9 mid-run, then resume ==="
 python -m chesszero.train configs/tiny.yaml --generations 40 &
 PID=$!
 sleep 45
-kill -9 $PID 2>/dev/null || true
-sleep 3
+# the drill is void if the run already finished — fail loudly, don't fake it
+kill -0 "$PID" 2>/dev/null || { echo "FAIL: background run ended before kill"; exit 1; }
+kill -9 "$PID"
+wait "$PID" 2>/dev/null || true
 timeout 600 python -m chesszero.train configs/tiny.yaml --generations 12
 GENS=$(wc -l < runs/tiny/metrics.jsonl)
 echo "metrics rows: $GENS"
 test "$GENS" -ge 12
+# resume must continue, not restart: a fresh gen-0 row may exist exactly once
+test "$(grep -c '"gen": 0,' runs/tiny/metrics.jsonl)" -eq 1
 echo "SMOKE OK — Phase 0 gate passed"
 ```
 
