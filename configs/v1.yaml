@@ -10,7 +10,7 @@ train:
   steps_per_generation: 128  # ~4x sample reuse vs 32k examples/gen at b2048
   buffer_capacity: 1000000
   min_buffer: 100000
-  resign_min_train_steps: 2000
+  resign_min_train_steps: 20000  # was 2000: at step ~1500 the holdout FP rate was 62% (weak play -> truncation draws rescue "lost" games); delay until conversion improves
 gating: {games: 120, promote_threshold: 0.53}
 seed: 0
 run_dir: runs/v1
