@@ -1,13 +1,19 @@
 #!/usr/bin/env python
-"""Spar the current best checkpoint against Stockfish at chosen Elo levels.
+"""Spar the current best checkpoint against Stockfish and/or simple baselines.
 
 Safe to run next to training (takes the 0.15 GPU memory slice). Loads
 runs/<run>/best once at startup — restart to pick up a newer promotion.
 
+Opponents (--vs, any mix):
+  <number>   Stockfish at that UCI_Elo (1350-2850)
+  random     uniform random legal moves
+  greedy     grabs the biggest immediate capture/promotion, else random
+  negamax2   2-ply alpha-beta on material (negamax3 for 3-ply, slower)
+
 Examples:
-  python scripts/versus_stockfish.py --elo 1350 --games 4
-  python scripts/versus_stockfish.py --elo 1350 1500 --movetime 0.5
-  python scripts/versus_stockfish.py --elo 1350 --watch     # Enter steps moves
+  python scripts/versus_stockfish.py --vs random greedy --games 4
+  python scripts/versus_stockfish.py --vs greedy 1350 --movetime 0.5
+  python scripts/versus_stockfish.py --vs 1350 --watch   # Enter steps moves
 
 In --watch mode press Enter to advance one ply, or q+Enter to stop watching
 (the game finishes at full speed and the match continues).
@@ -24,7 +30,102 @@ import chess.engine
 
 SF_ELO_MIN, SF_ELO_MAX = 1350, 2850   # Stockfish 14.1 UCI_Elo range
 
+PIECE_VALUES = {chess.PAWN: 100, chess.KNIGHT: 320, chess.BISHOP: 330,
+                chess.ROOK: 500, chess.QUEEN: 900, chess.KING: 0}
 
+
+# -- opponents ----------------------------------------------------------------
+class RandomPlayer:
+    name = "Random"
+
+    def __init__(self, rng):
+        self.rng = rng
+
+    def play(self, board, movetime):
+        return self.rng.choice(list(board.legal_moves))
+
+
+class GreedyPlayer:
+    """Takes the most valuable immediate capture/promotion, else random."""
+    name = "Greedy"
+
+    def __init__(self, rng):
+        self.rng = rng
+
+    def play(self, board, movetime):
+        def gain(m):
+            g = 0
+            if board.is_capture(m):
+                victim = board.piece_at(m.to_square)
+                g += PIECE_VALUES[victim.piece_type] if victim \
+                    else PIECE_VALUES[chess.PAWN]      # en passant
+            if m.promotion:
+                g += PIECE_VALUES[m.promotion] - PIECE_VALUES[chess.PAWN]
+            return g
+        moves = list(board.legal_moves)
+        best = max(gain(m) for m in moves)
+        return self.rng.choice([m for m in moves if gain(m) == best])
+
+
+class NegamaxPlayer:
+    """Alpha-beta on pure material, captures searched first."""
+
+    def __init__(self, rng, depth):
+        self.rng = rng
+        self.depth = depth
+        self.name = f"Negamax{depth}"
+
+    def _eval(self, board):     # side-to-move perspective, centipawns
+        score = 0
+        for piece_type, value in PIECE_VALUES.items():
+            score += value * (len(board.pieces(piece_type, board.turn))
+                              - len(board.pieces(piece_type, not board.turn)))
+        return score + self.rng.uniform(0, 10)   # jitter for variety
+
+    def _negamax(self, board, depth, alpha, beta):
+        if board.is_checkmate():
+            return -100_000 - depth               # prefer faster mates
+        if board.is_game_over(claim_draw=True):
+            return 0
+        if depth == 0:
+            return self._eval(board)
+        moves = sorted(board.legal_moves,
+                       key=board.is_capture, reverse=True)
+        for m in moves:
+            board.push(m)
+            score = -self._negamax(board, depth - 1, -beta, -alpha)
+            board.pop()
+            alpha = max(alpha, score)
+            if alpha >= beta:
+                break
+        return alpha
+
+    def play(self, board, movetime):
+        best_score, best_moves = -float("inf"), []
+        for m in board.legal_moves:
+            board.push(m)
+            score = -self._negamax(board, self.depth - 1,
+                                   -float("inf"), float("inf"))
+            board.pop()
+            if score > best_score:
+                best_score, best_moves = score, [m]
+            elif score == best_score:
+                best_moves.append(m)
+        return self.rng.choice(best_moves)
+
+
+class StockfishPlayer:
+    def __init__(self, sf, elo):
+        self.sf = sf
+        self.elo = elo
+        self.name = f"Stockfish-{elo}"
+        sf.configure({"UCI_LimitStrength": True, "UCI_Elo": elo})
+
+    def play(self, board, movetime):
+        return self.sf.play(board, chess.engine.Limit(time=movetime)).move
+
+
+# -- display ------------------------------------------------------------------
 def render_board(board: chess.Board, last_move: "chess.Move | None" = None) -> str:
     marked = {last_move.from_square, last_move.to_square} if last_move else set()
     lines = []
@@ -46,7 +147,8 @@ def print_position(board: chess.Board, ply: int, mover: str, san: str,
     print(render_board(board, last_move))
 
 
-def play_game(eng, sf, elo: int, movetime: float, we_are_white: bool,
+# -- match loop ---------------------------------------------------------------
+def play_game(eng, opponent, movetime: float, we_are_white: bool,
               opening_plies: int, max_plies: int, watch: bool,
               rng: random.Random) -> tuple[float, str, bool]:
     """Returns (score for our net, result string, watch still on)."""
@@ -67,9 +169,9 @@ def play_game(eng, sf, elo: int, movetime: float, we_are_white: bool,
         if our_turn:
             move = eng.best_move(movetime)
         else:
-            move = sf.play(board, chess.engine.Limit(time=movetime)).move
+            move = opponent.play(board, movetime)
         san = board.san(move)
-        mover = ("ChessZero" if our_turn else f"Stockfish-{elo}") \
+        mover = ("ChessZero" if our_turn else opponent.name) \
             + (" (W)" if board.turn == chess.WHITE else " (B)")
         eng.push_uci(move.uci())
         board.push(move)
@@ -98,9 +200,11 @@ def play_game(eng, sf, elo: int, movetime: float, we_are_white: bool,
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--elo", type=int, nargs="+", default=[1350])
+    ap.add_argument("--vs", nargs="+", default=["1350"], metavar="OPPONENT",
+                    help="mix of: Stockfish Elo numbers, random, greedy, "
+                         "negamax2, negamax3 (default: 1350)")
     ap.add_argument("--games", type=int, default=2,
-                    help="games per Elo level, colors alternate (default 2)")
+                    help="games per opponent, colors alternate (default 2)")
     ap.add_argument("--movetime", type=float, default=0.3,
                     help="seconds per move for both engines (default 0.3)")
     ap.add_argument("--watch", action="store_true",
@@ -124,32 +228,51 @@ def main():
     eng = Engine(args.best_dir, cfg)
     rng = random.Random(args.seed)
 
-    sf = chess.engine.SimpleEngine.popen_uci(args.sf)
+    baselines = {"random": lambda: RandomPlayer(rng),
+                 "greedy": lambda: GreedyPlayer(rng),
+                 "negamax2": lambda: NegamaxPlayer(rng, 2),
+                 "negamax3": lambda: NegamaxPlayer(rng, 3)}
+    sf = None
     try:
-        for elo in args.elo:
-            level = max(SF_ELO_MIN, min(SF_ELO_MAX, elo))
-            if level != elo:
-                print(f"note: {elo} outside Stockfish range, using {level}")
-            sf.configure({"UCI_LimitStrength": True, "UCI_Elo": level})
-            total, results = 0.0, []
+        for token in args.vs:
+            if token.lower() in baselines:
+                opponent = baselines[token.lower()]()
+                sf_elo = None
+            else:
+                try:
+                    elo = int(token)
+                except ValueError:
+                    print(f"unknown opponent {token!r} — use an Elo number or "
+                          f"one of: {', '.join(baselines)}")
+                    continue
+                sf_elo = max(SF_ELO_MIN, min(SF_ELO_MAX, elo))
+                if sf_elo != elo:
+                    print(f"note: {elo} outside Stockfish range, using {sf_elo}")
+                if sf is None:
+                    sf = chess.engine.SimpleEngine.popen_uci(args.sf)
+                opponent = StockfishPlayer(sf, sf_elo)
+
+            total, watch = 0.0, args.watch
             for g in range(args.games):
                 we_are_white = g % 2 == 0
-                score, result, args.watch = play_game(
-                    eng, sf, level, args.movetime, we_are_white,
-                    args.opening_plies, args.max_plies, args.watch, rng)
+                score, result, watch = play_game(
+                    eng, opponent, args.movetime, we_are_white,
+                    args.opening_plies, args.max_plies, watch, rng)
                 total += score
-                results.append(score)
                 tag = {1.0: "WIN", 0.5: "draw", 0.0: "loss"}[score]
-                print(f"[elo {level}] game {g + 1}/{args.games} "
+                print(f"[{opponent.name}] game {g + 1}/{args.games} "
                       f"as {'White' if we_are_white else 'Black'}: "
                       f"{result} -> {tag}", flush=True)
+            args.watch = watch
             pct = total / args.games
-            line = f"[elo {level}] score {total:g}/{args.games} ({pct:.0%})"
-            if 0.0 < pct < 1.0:
-                line += f" | implied Elo ~{level + 400 * math.log10(pct / (1 - pct)):.0f}"
+            line = f"[{opponent.name}] score {total:g}/{args.games} ({pct:.0%})"
+            if sf_elo is not None and 0.0 < pct < 1.0:
+                line += (f" | implied Elo "
+                         f"~{sf_elo + 400 * math.log10(pct / (1 - pct)):.0f}")
             print(line, flush=True)
     finally:
-        sf.quit()
+        if sf is not None:
+            sf.quit()
 
 
 if __name__ == "__main__":
