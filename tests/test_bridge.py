@@ -2,6 +2,7 @@ import random
 
 import chess
 import numpy as np
+import pytest
 
 from chesszero import bridge
 
@@ -37,6 +38,7 @@ def test_fixed_positions_exact():
         _assert_position_matches(chess.Board(fen))
 
 
+@pytest.mark.slow          # ~70s: pgx from_fen is slow; run via `pytest -m slow`
 def test_random_games_exact():
     rng = random.Random(42)
     for _ in range(2):

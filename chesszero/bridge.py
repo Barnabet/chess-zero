@@ -9,13 +9,12 @@ Verified pgx chess v2 facts (see plan Global Constraints):
 from __future__ import annotations
 
 import chess
-import jax
 import numpy as np
 import pgx
 import pgx._src.games.chess as _cg
+import pgx.experimental.chess as _pxc
 
 ENV = pgx.make("chess")
-_STATE_CLS = type(ENV.init(jax.random.PRNGKey(0)))
 
 TO_PLANE = np.asarray(_cg.TO_PLANE)      # (64, 64) -> plane
 FROM_PLANE = np.asarray(_cg.FROM_PLANE)  # (64, 73) -> to-square
@@ -63,8 +62,8 @@ def action_to_move(action: int, board: chess.Board) -> chess.Move:
 def state_from_fen(fen: str):
     """pgx State from FEN. History planes are empty — for play, prefer
     stepping the env move-by-move (engine does this)."""
-    return _STATE_CLS._from_fen(fen)
+    return _pxc.from_fen(fen)
 
 
 def fen_from_state(state) -> str:
-    return state._to_fen()
+    return _pxc.to_fen(state)
