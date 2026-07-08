@@ -25,9 +25,25 @@ import chess.engine
 SF_ELO_MIN, SF_ELO_MAX = 1350, 2850   # Stockfish 14.1 UCI_Elo range
 
 
-def print_position(board: chess.Board, ply: int, mover: str, san: str):
+def render_board(board: chess.Board, last_move: "chess.Move | None" = None) -> str:
+    marked = {last_move.from_square, last_move.to_square} if last_move else set()
+    lines = []
+    for rank in range(7, -1, -1):
+        cells = []
+        for file in range(8):
+            sq = chess.square(file, rank)
+            piece = board.piece_at(sq)
+            sym = piece.unicode_symbol() if piece else "·"
+            cells.append(f"[{sym}]" if sq in marked else f" {sym} ")
+        lines.append(f" {rank + 1} " + "".join(cells))
+    lines.append("    " + "".join(f" {f} " for f in "abcdefgh"))
+    return "\n".join(lines)
+
+
+def print_position(board: chess.Board, ply: int, mover: str, san: str,
+                   last_move: "chess.Move | None" = None):
     print(f"\nply {ply}: {mover} played {san}")
-    print(board.unicode(borders=True, empty_square="."))
+    print(render_board(board, last_move))
 
 
 def play_game(eng, sf, elo: int, movetime: float, we_are_white: bool,
@@ -44,7 +60,7 @@ def play_game(eng, sf, elo: int, movetime: float, we_are_white: bool,
         board.push(mv)
     if watch and opening_plies:
         print(f"\n[opening: {opening_plies} random plies]")
-        print(board.unicode(borders=True, empty_square="."))
+        print(render_board(board, board.peek() if board.move_stack else None))
 
     while not board.is_game_over(claim_draw=True) and board.ply() < max_plies:
         our_turn = board.turn == (chess.WHITE if we_are_white else chess.BLACK)
@@ -58,7 +74,7 @@ def play_game(eng, sf, elo: int, movetime: float, we_are_white: bool,
         eng.push_uci(move.uci())
         board.push(move)
         if watch:
-            print_position(board, board.ply(), mover, san)
+            print_position(board, board.ply(), mover, san, move)
             try:
                 if input("Enter = next move, q = stop watching > ").strip() \
                         .lower() == "q":
