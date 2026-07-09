@@ -1,0 +1,11 @@
+# ChessZero released checkpoints
+
+Orbax checkpoints of promoted "best" networks from the v1 run (6 blocks x 128 channels, bf16).
+Load with `chesszero.engine.Engine(<dir>, cfg)` using `configs/v1.yaml`.
+
+| checkpoint | date | internal Elo vs init | notes |
+|---|---|---|---|
+| best-gen1709 | 2026-07-09 | ~+1563 | LR 6.6e-4 era; resign disabled |
+
+Internal Elo is chained self-play gate Elo — inflated vs external opponents
+(see project notes); use versus_stockfish.py for real-world anchoring.
