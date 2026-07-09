@@ -7,6 +7,7 @@ selfplay:
   steps_per_generation: 16
 train:
   batch_size: 1024
+  lr: 0.00066  # cut 3x from 2e-3 at ~125k steps: loss flat 2.68-2.74 since gen 840, promote cadence 60->90->150->120+ gens
   steps_per_generation: 128  # ~4x sample reuse vs 32k examples/gen at b2048
   buffer_capacity: 1000000
   min_buffer: 100000
