@@ -150,8 +150,8 @@ def print_position(board: chess.Board, ply: int, mover: str, san: str,
 # -- match loop ---------------------------------------------------------------
 def play_game(eng, opponent, movetime: float, we_are_white: bool,
               opening_plies: int, max_plies: int, watch: bool,
-              rng: random.Random) -> tuple[float, str, bool]:
-    """Returns (score for our net, result string, watch still on)."""
+              rng: random.Random) -> tuple[float, str, str, int, bool]:
+    """Returns (score for our net, result, termination, plies, watch still on)."""
     board = chess.Board()
     eng.reset()
     for _ in range(opening_plies):           # shared random opening for variety
@@ -185,16 +185,18 @@ def play_game(eng, opponent, movetime: float, we_are_white: bool,
                 watch = False
 
     if board.ply() >= max_plies and not board.is_game_over(claim_draw=True):
-        result = "1/2-1/2 (adjudicated at max plies)"
-        score = 0.5
+        result, score = "1/2-1/2", 0.5
+        termination = f"adjudicated at {max_plies} plies"
     else:
-        result = board.result(claim_draw=True)
+        outcome = board.outcome(claim_draw=True)
+        result = outcome.result()
+        termination = outcome.termination.name.lower().replace("_", " ")
         if result == "1/2-1/2":
             score = 0.5
         else:
             white_won = result == "1-0"
             score = 1.0 if white_won == we_are_white else 0.0
-    return score, result, watch
+    return score, result, termination, board.ply(), watch
 
 
 def main():
@@ -257,22 +259,29 @@ def main():
                 opponent = StockfishPlayer(sf, sf_elo)
 
             total, watch = 0.0, args.watch
+            plies_sum, terminations = 0, {}
             for g in range(args.games):
                 we_are_white = g % 2 == 0
                 opening = 0 if args.clean_first and not first_done \
                     else args.opening_plies
                 first_done = True
-                score, result, watch = play_game(
+                score, result, termination, plies, watch = play_game(
                     eng, opponent, args.movetime, we_are_white,
                     opening, args.max_plies, watch, rng)
                 total += score
+                plies_sum += plies
+                terminations[termination] = terminations.get(termination, 0) + 1
                 tag = {1.0: "WIN", 0.5: "draw", 0.0: "loss"}[score]
                 print(f"[{opponent.name}] game {g + 1}/{args.games} "
                       f"as {'White' if we_are_white else 'Black'}: "
-                      f"{result} -> {tag}", flush=True)
+                      f"{result} -> {tag} | {(plies + 1) // 2} moves, "
+                      f"{termination} | total {total:g}/{g + 1}", flush=True)
             args.watch = watch
             pct = total / args.games
-            line = f"[{opponent.name}] score {total:g}/{args.games} ({pct:.0%})"
+            terms = ", ".join(f"{t} x{n}" for t, n in
+                              sorted(terminations.items(), key=lambda kv: -kv[1]))
+            line = (f"[{opponent.name}] score {total:g}/{args.games} ({pct:.0%})"
+                    f" | avg {plies_sum / args.games / 2:.0f} moves | {terms}")
             if sf_elo is not None and 0.0 < pct < 1.0:
                 line += (f" | implied Elo "
                          f"~{sf_elo + 400 * math.log10(pct / (1 - pct)):.0f}")
