@@ -20,6 +20,7 @@ train:
   resign_min_train_steps: 20000
 gating: {games: 120, promote_threshold: 0.53}
 anchor_every_generations: 60
+anchor_opponents: ["negamax2", "negamax3", "zero:runs/v1/best"]  # v1's final best as fixed reference
 seed: 0
 run_dir: runs/v2
 checkpoint_every_min: 15.0

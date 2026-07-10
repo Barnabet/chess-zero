@@ -74,7 +74,10 @@ class Config:
     run_dir: str = "runs/dev"
     checkpoint_every_min: float = 15.0
     gate_every_generations: int = 10
-    anchor_every_generations: int = 0  # spar best vs negamax2/3 every N gens (0 = off)
+    anchor_every_generations: int = 0  # spar best vs anchor_opponents every N gens (0 = off)
+    anchor_opponents: list = field(
+        default_factory=lambda: ["negamax2", "negamax3"])
+    # versus-script opponent tokens; zero:<best_dir> pits another checkpoint
     max_generations: int = 1_000_000
 
     @classmethod

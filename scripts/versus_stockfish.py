@@ -114,6 +114,31 @@ class NegamaxPlayer:
         return self.rng.choice(best_moves)
 
 
+class ChessZeroPlayer:
+    """Another ChessZero checkpoint as the opponent (net vs net).
+
+    Keeps its own Engine in sync by replaying board.move_stack deltas, so it
+    works with random openings and multi-game matches (a shrinking stack
+    means a new game started)."""
+
+    def __init__(self, best_dir, cfg, fixed_sims: int):
+        from pathlib import Path
+        from chesszero.engine import Engine
+        self.eng = Engine(best_dir, cfg, fixed_sims=fixed_sims)
+        p = Path(best_dir)
+        self.name = "Zero-" + (p.parent.name if p.name == "best" else p.name)
+        self._pushed = 0
+
+    def play(self, board, movetime):
+        if len(board.move_stack) < self._pushed:      # new game
+            self.eng.reset()
+            self._pushed = 0
+        for mv in board.move_stack[self._pushed:]:
+            self.eng.push_uci(mv.uci())
+        self._pushed = len(board.move_stack)
+        return self.eng.best_move(movetime)
+
+
 class StockfishPlayer:
     def __init__(self, sf, elo):
         self.sf = sf
@@ -204,7 +229,8 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--vs", nargs="+", default=["1350"], metavar="OPPONENT",
                     help="mix of: Stockfish Elo numbers, random, greedy, "
-                         "negamax2, negamax3 (default: 1350)")
+                         "negamax2, negamax3, zero:<best_dir> (another "
+                         "ChessZero checkpoint) (default: 1350)")
     ap.add_argument("--games", type=int, default=2,
                     help="games per opponent, colors alternate (default 2)")
     ap.add_argument("--movetime", type=float, default=0.3,
@@ -246,6 +272,9 @@ def main():
         for token in args.vs:
             if token.lower() in baselines:
                 opponent = baselines[token.lower()]()
+                sf_elo = None
+            elif token.lower().startswith("zero:"):
+                opponent = ChessZeroPlayer(token[5:], cfg, args.sims)
                 sf_elo = None
             else:
                 try:

@@ -24,13 +24,14 @@ def parse_anchor_output(text: str) -> dict[str, float]:
 class AnchorRunner:
     def __init__(self, best_dir: str, config_path: str, games: int = 6,
                  movetime: float = 0.2, timeout_s: float = 900.0,
-                 cmd: "list[str] | None" = None):
+                 cmd: "list[str] | None" = None,
+                 opponents: "tuple[str, ...]" = ("negamax2", "negamax3")):
         script = Path(__file__).resolve().parents[1] \
             / "scripts" / "versus_stockfish.py"
         self.cmd = cmd or [
             sys.executable, str(script),
             "--best-dir", str(best_dir), "--config", str(config_path),
-            "--vs", "negamax2", "negamax3",
+            "--vs", *opponents,
             "--games", str(games), "--movetime", str(movetime),
             "--sims", "32"]  # pinned so anchor scores compare across the run
         self.timeout_s = timeout_s

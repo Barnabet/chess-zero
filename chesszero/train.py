@@ -328,8 +328,8 @@ class Trainer:
                 res = self.anchor.poll()
                 if res is not None:
                     if res:
-                        row["anchor_negamax2"] = res.get("negamax2")
-                        row["anchor_negamax3"] = res.get("negamax3")
+                        for name, frac in res.items():
+                            row[f"anchor_{name}"] = frac
                         self._log("ANCHOR gen %d: %s" % (gen, ", ".join(
                             f"{k} {v:.0%}" for k, v in sorted(res.items()))))
                     else:
@@ -339,7 +339,8 @@ class Trainer:
                     and (gen + 1) % cfg.anchor_every_generations == 0
                     and self.anchor is None and self.global_step > 0):
                 self.anchor = AnchorRunner(
-                    str((self.run_dir / "best").absolute()), self._config_path)
+                    str((self.run_dir / "best").absolute()), self._config_path,
+                    opponents=tuple(cfg.anchor_opponents))
                 try:
                     self.anchor.start()
                 except OSError:
