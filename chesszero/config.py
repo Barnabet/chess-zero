@@ -30,6 +30,8 @@ class SelfplayConfig:
                                        # mover-relative and alternate sign, so a
                                        # shared ply counter would never trip)
     resign_holdout_frac: float = 0.10 # games that never resign (FP measurement)
+    opening_plies_max: int = 0        # k ~ U{0..max} random plies at game reset (0 = off)
+    search_max_depth: int = 0         # mctx max_depth for all searches (0 = unlimited)
 
 
 @dataclass
@@ -47,6 +49,11 @@ class TrainConfig:
     moves_left_weight: float = 0.1
     moves_left_scale: float = 50.0    # loss operates on plies / scale
     resign_min_train_steps: int = 2000  # resignation off until net has trained
+    lr_decay_steps: int = 0           # cosine-decay horizon in steps (0 = constant after warmup)
+    lr_floor_frac: float = 0.1        # cosine floor = lr * lr_floor_frac
+    resign_arm_fp: float = 0.05       # auto-arm resignation below this windowed holdout FP
+    resign_disarm_fp: float = 0.08    # auto-disarm above this (hysteresis)
+    resign_fp_window: int = 2000      # trailing holdout triggers in the FP window
 
 
 @dataclass
@@ -67,6 +74,7 @@ class Config:
     run_dir: str = "runs/dev"
     checkpoint_every_min: float = 15.0
     gate_every_generations: int = 10
+    anchor_every_generations: int = 0  # spar best vs negamax2/3 every N gens (0 = off)
     max_generations: int = 1_000_000
 
     @classmethod
