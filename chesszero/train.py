@@ -69,10 +69,12 @@ from pathlib import Path
 import numpy as np
 import orbax.checkpoint as ocp
 
+from chesszero.anchor import AnchorRunner
 from chesszero.buffer import ReplayBuffer
 from chesszero.config import Config
 from chesszero.evaluate import play_match
 from chesszero.net import ChessNet
+from chesszero.resign import ResignGovernor
 from chesszero.selfplay import SelfplayWorker, pack_examples
 
 
@@ -139,6 +141,12 @@ class Trainer:
         self._lr_schedule = make_lr_schedule(cfg.train)
         self._t0 = time.time()
         self._fp_alarm_active = False
+        t = cfg.train
+        self.governor = ResignGovernor(t.resign_arm_fp, t.resign_disarm_fp,
+                                       t.resign_fp_window,
+                                       t.resign_min_train_steps)
+        self.anchor: "AnchorRunner | None" = None
+        self._config_path = getattr(cfg, "_source_path", "configs/v1.yaml")
 
         self.mgr = ocp.CheckpointManager(
             (self.run_dir / "ckpts").absolute(),
@@ -227,12 +235,17 @@ class Trainer:
         last_ckpt = time.time()
         for gen in range(self.start_generation, target):
             t0 = time.time()
-            allow_resign = self.global_step >= cfg.train.resign_min_train_steps
+            allow_resign = self.governor.armed
             examples, stats = self.worker.run_generation(self.params,
                                                          allow_resign)
             sp_seconds = time.time() - t0
             self.holdout_fp_total += stats.holdout_false_positives
             self.holdout_n_total += stats.holdout_resign_games
+            armed, fp_windowed, transition = self.governor.update(
+                stats.holdout_false_positives, stats.holdout_resign_games,
+                self.global_step)
+            if transition:
+                self._log(transition)
             if examples:
                 self.buffer.add(*pack_examples(examples))
             metrics = {}
@@ -262,6 +275,8 @@ class Trainer:
                                if stats.games else None),
                    "holdout_fp": stats.holdout_false_positives,
                    "holdout_n": stats.holdout_resign_games,
+                   "resign_armed": armed,
+                   "resign_fp_windowed": fp_windowed,
                    "sp_seconds": sp_seconds,
                    "moves_per_s": moves / sp_seconds,
                    "gen_seconds": time.time() - t0, **metrics}
@@ -303,6 +318,27 @@ class Trainer:
                         self._log("ALARM 3 consecutive gate failures —"
                                   " net is not improving; inspect losses"
                                   " before letting the run continue")
+
+            if self.anchor is not None:
+                res = self.anchor.poll()
+                if res is not None:
+                    if res:
+                        row["anchor"] = res
+                        self._log("ANCHOR gen %d: %s" % (gen, ", ".join(
+                            f"{k} {v:.0%}" for k, v in sorted(res.items()))))
+                    else:
+                        self._log("ANCHOR match failed or timed out — skipped")
+                    self.anchor = None
+            if (cfg.anchor_every_generations
+                    and (gen + 1) % cfg.anchor_every_generations == 0
+                    and self.anchor is None and self.global_step > 0):
+                self.anchor = AnchorRunner(
+                    str((self.run_dir / "best").absolute()), self._config_path)
+                try:
+                    self.anchor.start()
+                except OSError:
+                    self._log("ANCHOR spawn failed — skipped")
+                    self.anchor = None
 
             with (self.run_dir / "metrics.jsonl").open("a") as f:
                 f.write(json.dumps(row) + "\n")

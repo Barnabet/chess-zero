@@ -98,6 +98,41 @@ def test_training_gating_checkpoint_after_donation(cfg):
     assert t2.start_generation == 2 and t2.global_step > 0
 
 
+def test_trainer_uses_governor_and_spawns_anchor(cfg, monkeypatch):
+    import sys
+    import chesszero.train as T
+
+    cfg.anchor_every_generations = 1
+    spawned = []
+    real_init = T.AnchorRunner.__init__
+
+    def fake_init(self, best_dir, config_path, **kw):
+        kw["cmd"] = [sys.executable, "-c",
+                     "print('[Negamax2] score 3/6 (50%)')"]
+        real_init(self, best_dir, config_path, **kw)
+        spawned.append(best_dir)
+
+    monkeypatch.setattr(T.AnchorRunner, "__init__", fake_init)
+    trainer = T.Trainer(cfg)
+    # pre-seed the buffer past min_buffer (as in the donation test): organic
+    # selfplay does not finish enough games in 3 gens, and the anchor only
+    # spawns once global_step > 0
+    import numpy as np
+
+    from chesszero.selfplay import Example, pack_examples
+    exs = [Example(np.zeros((8, 8, 119), np.float16),
+                   np.full(4672, 1 / 4672, np.float16) if i % 2 == 0 else None,
+                   i % 3, 10)
+           for i in range(cfg.train.min_buffer + 64)]
+    trainer.buffer.add(*pack_examples(exs))
+    trainer.run(max_generations=3)
+    assert spawned, "anchor subprocess was never spawned"
+    rows = [__import__("json").loads(l) for l in
+            (pathlib.Path(cfg.run_dir) / "metrics.jsonl").read_text().splitlines()]
+    assert all("resign_armed" in r for r in rows)
+    assert any("anchor" in r for r in rows)
+
+
 def test_make_lr_schedule_cosine_decay_to_floor():
     from chesszero.config import TrainConfig
     from chesszero.train import make_lr_schedule

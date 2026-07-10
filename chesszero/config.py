@@ -79,7 +79,9 @@ class Config:
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "Config":
-        return cls.from_dict(yaml.safe_load(Path(path).read_text()) or {})
+        cfg = cls.from_dict(yaml.safe_load(Path(path).read_text()) or {})
+        cfg._source_path = str(path)
+        return cfg
 
     @classmethod
     def from_dict(cls, raw: dict) -> "Config":
