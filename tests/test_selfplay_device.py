@@ -65,3 +65,11 @@ def test_random_opening_plays_k_plies():
     # k=0 must be the identity
     same = _random_opening(jax.random.PRNGKey(1), state, max_plies=0)
     assert np.asarray(same._step_count).max() == 0
+
+
+def test_play_step_accepts_search_max_depth():
+    import inspect
+    from chesszero.selfplay import make_play_step
+    from chesszero.evaluate import _make_versus_step
+    assert "search_max_depth" in inspect.signature(make_play_step).parameters
+    assert "search_max_depth" in inspect.signature(_make_versus_step).parameters

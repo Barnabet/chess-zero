@@ -53,6 +53,7 @@ class Engine:
                 out = mctx.gumbel_muzero_policy(
                     params=params, rng_key=key, root=root,
                     recurrent_fn=recurrent_fn, num_simulations=sims,
+                    max_depth=self.cfg.selfplay.search_max_depth or None,
                     invalid_actions=~state.legal_action_mask,
                     max_num_considered_actions=(
                         self.cfg.selfplay.max_considered_actions),

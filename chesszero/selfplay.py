@@ -82,8 +82,10 @@ def _random_opening(key, state, max_plies: int):
 
 
 def make_play_step(net, num_simulations: int, max_considered: int,
-                   gumbel_scale: float, opening_plies_max: int = 0):
+                   gumbel_scale: float, opening_plies_max: int = 0,
+                   search_max_depth: int = 0):
     recurrent_fn = make_recurrent_fn(net)
+    max_depth = search_max_depth or None
 
     @jax.jit
     def play_step(params, state, reset_mask, key):
@@ -100,6 +102,7 @@ def make_play_step(net, num_simulations: int, max_considered: int,
         out = mctx.gumbel_muzero_policy(
             params=params, rng_key=k_search, root=root,
             recurrent_fn=recurrent_fn, num_simulations=num_simulations,
+            max_depth=max_depth,
             invalid_actions=~state.legal_action_mask,
             max_num_considered_actions=max_considered,
             gumbel_scale=gumbel_scale)
@@ -178,10 +181,12 @@ class SelfplayWorker:
         self.n = sp.num_games
         self.step_full = make_play_step(net, sp.sims_full,
                                         sp.max_considered_actions, 1.0,
-                                        sp.opening_plies_max)
+                                        sp.opening_plies_max,
+                                        sp.search_max_depth)
         self.step_cheap = make_play_step(net, sp.sims_cheap,
                                          sp.max_considered_actions, 1.0,
-                                         sp.opening_plies_max)
+                                         sp.opening_plies_max,
+                                         sp.search_max_depth)
         self.key = jax.random.PRNGKey(seed)
         self.np_rng = np.random.default_rng(seed)
         self.state = init_batch(self.n, seed ^ 0x5EED)

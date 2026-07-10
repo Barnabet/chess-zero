@@ -26,7 +26,9 @@ def _pair_forward(net, pa, pb, is_a, obs, legal_mask):
     return logits, value
 
 
-def _make_versus_step(net, sims, max_considered):
+def _make_versus_step(net, sims, max_considered, search_max_depth=0):
+    max_depth = search_max_depth or None
+
     def recurrent_fn(params, rng_key, action, state):
         del rng_key
         pa, pb, a_player = params["a"], params["b"], params["a_player"]
@@ -56,6 +58,7 @@ def _make_versus_step(net, sims, max_considered):
         out = mctx.gumbel_muzero_policy(
             params=params, rng_key=k_search, root=root,
             recurrent_fn=recurrent_fn, num_simulations=sims,
+            max_depth=max_depth,
             invalid_actions=~state.legal_action_mask,
             max_num_considered_actions=max_considered,
             gumbel_scale=0.0)
@@ -82,14 +85,15 @@ def _make_versus_step(net, sims, max_considered):
 _VERSUS_CACHE: dict = {}
 
 
-def _get_versus_step(net, sims, max_considered):
+def _get_versus_step(net, sims, max_considered, search_max_depth=0):
     """Cache jitted versus steps — a fresh jit per gate would re-XLA-compile
     the whole two-net search graph every gate (~180x over a 24h run). Keyed
     by id(net): valid while the caller keeps one net instance alive per
     process, which the Trainer does."""
-    key = (id(net), sims, max_considered)
+    key = (id(net), sims, max_considered, search_max_depth)
     if key not in _VERSUS_CACHE:
-        _VERSUS_CACHE[key] = _make_versus_step(net, sims, max_considered)
+        _VERSUS_CACHE[key] = _make_versus_step(net, sims, max_considered,
+                                               search_max_depth)
     return _VERSUS_CACHE[key]
 
 
@@ -103,7 +107,8 @@ def play_match(net, params_a, params_b, cfg: Config, seed: int = 0) -> float:
     a_player = jnp.asarray(np.where(a_white, white_id, 1 - white_id))
     params = {"a": params_a, "b": params_b, "a_player": a_player}
     step = _get_versus_step(net, cfg.selfplay.sims_full,
-                            cfg.selfplay.max_considered_actions)
+                            cfg.selfplay.max_considered_actions,
+                            cfg.selfplay.search_max_depth)
     key = jax.random.PRNGKey(seed * 2 + 1)
     ply = 0
     while True:
