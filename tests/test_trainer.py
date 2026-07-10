@@ -96,3 +96,17 @@ def test_training_gating_checkpoint_after_donation(cfg):
     assert any("gate_score" in l for l in lines)      # gating fired
     t2 = Trainer(cfg)                                 # checkpoint is loadable
     assert t2.start_generation == 2 and t2.global_step > 0
+
+
+def test_make_lr_schedule_cosine_decay_to_floor():
+    from chesszero.config import TrainConfig
+    from chesszero.train import make_lr_schedule
+    cfg = TrainConfig(lr=2e-3, warmup_steps=100,
+                      lr_decay_steps=1000, lr_floor_frac=0.1)
+    s = make_lr_schedule(cfg)
+    assert float(s(0)) == 0.0                                   # warmup start
+    assert float(s(100)) == pytest.approx(2e-3)                 # warmup end
+    mid = float(s(100 + 500))                                   # cosine midpoint
+    assert mid == pytest.approx((2e-3 + 2e-4) / 2, rel=1e-3)
+    assert float(s(100 + 1000)) == pytest.approx(2e-4, rel=1e-3)  # floor
+    assert float(s(1_000_000)) == pytest.approx(2e-4, rel=1e-3)   # stays at floor

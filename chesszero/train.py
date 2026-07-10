@@ -15,9 +15,13 @@ from chesszero.config import TrainConfig
 
 
 def make_lr_schedule(cfg: TrainConfig) -> optax.Schedule:
+    if cfg.lr_decay_steps > 0:
+        main = optax.cosine_decay_schedule(
+            cfg.lr, cfg.lr_decay_steps, alpha=cfg.lr_floor_frac)
+    else:
+        main = optax.constant_schedule(cfg.lr)
     return optax.join_schedules(
-        [optax.linear_schedule(0.0, cfg.lr, cfg.warmup_steps),
-         optax.constant_schedule(cfg.lr)],
+        [optax.linear_schedule(0.0, cfg.lr, cfg.warmup_steps), main],
         boundaries=[cfg.warmup_steps])
 
 
