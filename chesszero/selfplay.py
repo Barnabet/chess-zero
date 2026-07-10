@@ -109,7 +109,7 @@ def make_play_step(net, num_simulations: int, max_considered: int,
 
         next_state = jax.vmap(ENV.step)(state, out.action)
         record = {
-            "obs": state.observation,
+            "obs": state.observation.astype(jnp.float16),
             "action_weights": out.action_weights,
             "action": out.action,
             "root_value": value,
@@ -214,8 +214,9 @@ class SelfplayWorker:
 
     def _process(self, record, full, allow_resign, examples, stats):
         sp = self.cfg.selfplay
-        obs = np.asarray(record["obs"], np.float16)
-        weights = np.asarray(record["action_weights"], np.float16)
+        obs = np.asarray(record["obs"])          # already f16 from device
+        weights = (np.asarray(record["action_weights"], np.float16)
+                   if full else None)             # skip 38MB/step host copy on cheap steps
         movers = np.asarray(record["mover"])
         values = np.asarray(record["root_value"])
         rewards = np.asarray(record["rewards"])

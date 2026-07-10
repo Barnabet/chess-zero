@@ -103,6 +103,16 @@ def test_resignation_forces_loss():
     assert losses and wins                               # both perspectives present
 
 
+def test_record_obs_is_f16_on_device():
+    from chesszero.selfplay import make_play_step, init_batch
+    net = ChessNet(NetConfig(channels=8, blocks=1))
+    params = net.init(jax.random.PRNGKey(0), jnp.zeros((1, 8, 8, 119)))
+    step = make_play_step(net, 2, 4, 1.0)
+    state = init_batch(2, 0)
+    _, record = step(params, state, jnp.zeros(2, bool), jax.random.PRNGKey(1))
+    assert record["obs"].dtype == jnp.float16
+
+
 def test_pack_examples_shapes():
     ex = [Example(np.zeros((8, 8, 119), np.float16),
                   np.full(4672, 1 / 4672, np.float16), 0, 10),
