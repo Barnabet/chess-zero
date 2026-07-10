@@ -51,3 +51,4 @@ Load with `configs/v2.yaml`. Internal Elo chained from v2's own random init.
 | v2-gen0089 | 2026-07-10 | ~+444 | gate 0.558 vs gen 59 |
 | v2-gen0149 | 2026-07-10 | ~+533 | gate 0.625 vs gen 89 (gen 119 gate failed 0.496) |
 | v2-gen0209 | 2026-07-10 | ~+559 | gate 0.538 vs gen 149 (gen 179 gate failed 0.483) |
+| v2-gen0239 | 2026-07-10 | ~+582 | gate 0.533 vs gen 209 |
