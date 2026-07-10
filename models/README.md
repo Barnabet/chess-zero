@@ -38,3 +38,12 @@ Load with `chesszero.engine.Engine(<dir>, cfg)` using `configs/v1.yaml`.
 
 Internal Elo is chained self-play gate Elo — inflated vs external opponents
 (see project notes); use versus_stockfish.py for real-world anchoring.
+
+## v2 run
+
+Same 6x128 net; sims 64/16, random opening plies, cosine LR, resign governor.
+Load with `configs/v2.yaml`. Internal Elo chained from v2's own random init.
+
+| checkpoint | date | internal Elo vs init | notes |
+|---|---|---|---|
+| v2-gen0029 | 2026-07-10 | ~+280 | gate 0.833 vs random init; first promotion |
