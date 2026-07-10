@@ -54,15 +54,43 @@ def _reset_where(mask, fresh, state):
         fresh, state)
 
 
+def _random_opening(key, state, max_plies: int):
+    """Play k ~ U{0..max_plies} uniformly-random legal moves on each game in
+    the batch (v2 opening diversity). Terminated games and games past their
+    own k are left untouched. max_plies=0 is the identity."""
+    if max_plies == 0:
+        return state
+    n = state.current_player.shape[0]
+    k_count, k_moves = jax.random.split(key)
+    k = jax.random.randint(k_count, (n,), 0, max_plies + 1)
+
+    def body(i, carry):
+        state, key = carry
+        key, sub = jax.random.split(key)
+        logits = jnp.where(state.legal_action_mask, 0.0, -jnp.inf)
+        action = jax.random.categorical(sub, logits, axis=-1)
+        stepped = jax.vmap(ENV.step)(state, action)
+        active = (i < k) & ~(state.terminated | state.truncated)
+        state = jax.tree.map(
+            lambda new, old: jnp.where(
+                active.reshape((-1,) + (1,) * (new.ndim - 1)), new, old),
+            stepped, state)
+        return state, key
+
+    state, _ = jax.lax.fori_loop(0, max_plies, body, (state, k_moves))
+    return state
+
+
 def make_play_step(net, num_simulations: int, max_considered: int,
-                   gumbel_scale: float):
+                   gumbel_scale: float, opening_plies_max: int = 0):
     recurrent_fn = make_recurrent_fn(net)
 
     @jax.jit
     def play_step(params, state, reset_mask, key):
-        k_init, k_search = jax.random.split(key)
+        k_init, k_open, k_search = jax.random.split(key, 3)
         n = state.current_player.shape[0]
         fresh = jax.vmap(ENV.init)(jax.random.split(k_init, n))
+        fresh = _random_opening(k_open, fresh, opening_plies_max)
         state = _reset_where(reset_mask, fresh, state)
 
         logits, value = net_forward(net, params, state.observation,
@@ -149,9 +177,11 @@ class SelfplayWorker:
         self.cfg = cfg
         self.n = sp.num_games
         self.step_full = make_play_step(net, sp.sims_full,
-                                        sp.max_considered_actions, 1.0)
+                                        sp.max_considered_actions, 1.0,
+                                        sp.opening_plies_max)
         self.step_cheap = make_play_step(net, sp.sims_cheap,
-                                         sp.max_considered_actions, 1.0)
+                                         sp.max_considered_actions, 1.0,
+                                         sp.opening_plies_max)
         self.key = jax.random.PRNGKey(seed)
         self.np_rng = np.random.default_rng(seed)
         self.state = init_batch(self.n, seed ^ 0x5EED)

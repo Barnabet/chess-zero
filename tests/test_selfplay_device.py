@@ -50,3 +50,18 @@ def test_reset_mask_restarts_slot():
     # startpos observation is identical regardless of key
     np.testing.assert_array_equal(np.asarray(rec["obs"])[0],
                                   np.asarray(fresh.observation)[0])
+
+
+def test_random_opening_plays_k_plies():
+    import jax
+    import numpy as np
+    from chesszero.selfplay import init_batch, _random_opening
+    state = init_batch(16, seed=0)
+    out = _random_opening(jax.random.PRNGKey(1), state, max_plies=8)
+    counts = np.asarray(out._step_count).reshape(-1)
+    assert counts.min() >= 0 and counts.max() <= 8
+    assert len(set(counts.tolist())) > 2          # k actually varies
+    assert not np.asarray(out.terminated).any()   # guard kept games alive
+    # k=0 must be the identity
+    same = _random_opening(jax.random.PRNGKey(1), state, max_plies=0)
+    assert np.asarray(same._step_count).max() == 0
