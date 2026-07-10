@@ -30,6 +30,7 @@ Load with `chesszero.engine.Engine(<dir>, cfg)` using `configs/v1.yaml`.
 | best-gen2909 | 2026-07-10 | ~+2963 | gate 0.542 vs gen 2879 |
 | best-gen2939 | 2026-07-10 | ~+3024 | gate 0.587 vs gen 2909 |
 | best-gen3029 | 2026-07-10 | ~+3074 | gate 0.571 vs gen 2939 |
+| best-gen3089 | 2026-07-10 | ~+3142 | gate 0.596 vs gen 3029 |
 
 Internal Elo is chained self-play gate Elo — inflated vs external opponents
 (see project notes); use versus_stockfish.py for real-world anchoring.
