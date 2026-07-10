@@ -48,3 +48,4 @@ Load with `configs/v2.yaml`. Internal Elo chained from v2's own random init.
 |---|---|---|---|
 | v2-gen0029 | 2026-07-10 | ~+280 | gate 0.833 vs random init; first promotion |
 | v2-gen0059 | 2026-07-10 | ~+404 | gate 0.671 vs gen 29 |
+| v2-gen0089 | 2026-07-10 | ~+444 | gate 0.558 vs gen 59 |
