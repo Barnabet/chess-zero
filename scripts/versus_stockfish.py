@@ -24,9 +24,27 @@ os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.15")
 import argparse
 import math
 import random
+import sys
+import time
+from pathlib import Path
 
 import chess
 import chess.engine
+
+
+class _Tee:
+    """Mirror stdout to a log file so anchor runs keep their per-game detail."""
+
+    def __init__(self, *streams):
+        self._streams = streams
+
+    def write(self, text):
+        for s in self._streams:
+            s.write(text)
+
+    def flush(self):
+        for s in self._streams:
+            s.flush()
 
 SF_ELO_MIN, SF_ELO_MAX = 1350, 2850   # Stockfish 14.1 UCI_Elo range
 
@@ -255,6 +273,14 @@ def main():
 
     from chesszero.config import Config
     from chesszero.engine import Engine
+
+    run_dir = Path(args.best_dir).resolve().parent
+    if run_dir.is_dir():
+        log_dir = run_dir / "anchors"
+        log_dir.mkdir(exist_ok=True)
+        log_path = log_dir / time.strftime("versus-%Y%m%d-%H%M%S.log")
+        sys.stdout = _Tee(sys.stdout, open(log_path, "w"))
+        print(f"(full output logged to {log_path})")
 
     cfg = Config.from_yaml(args.config)
     print(f"loading best checkpoint from {args.best_dir} "
