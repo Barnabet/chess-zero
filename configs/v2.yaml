@@ -1,0 +1,26 @@
+net: {channels: 128, blocks: 6, se_ratio: 4, precision: bf16}
+selfplay:
+  num_games: 2048
+  sims_full: 64          # v1: 32 — tactical-blindness fix
+  sims_cheap: 16         # v1: 8
+  full_search_prob: 0.25
+  steps_per_generation: 16
+  opening_plies_max: 8   # k ~ U{0..8} random plies per game
+  search_max_depth: 16
+  resign_threshold: 0.98         # v1: 0.95
+  resign_consecutive_moves: 3    # v1: 2
+train:
+  batch_size: 1024
+  steps_per_generation: 128
+  buffer_capacity: 1000000
+  min_buffer: 100000
+  lr: 0.002
+  lr_decay_steps: 400000   # cosine horizon (~3 days)
+  lr_floor_frac: 0.1       # floor = 2e-4
+  resign_min_train_steps: 20000
+gating: {games: 120, promote_threshold: 0.53}
+anchor_every_generations: 60
+seed: 0
+run_dir: runs/v2
+checkpoint_every_min: 15.0
+gate_every_generations: 30

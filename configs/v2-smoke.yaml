@@ -1,0 +1,24 @@
+net: {channels: 16, blocks: 2, se_ratio: 4, precision: bf16}
+selfplay:
+  num_games: 64
+  sims_full: 4
+  sims_cheap: 2
+  full_search_prob: 0.5
+  steps_per_generation: 8
+  opening_plies_max: 8
+  search_max_depth: 16
+train:
+  batch_size: 64
+  steps_per_generation: 4
+  buffer_capacity: 20000
+  min_buffer: 500
+  lr: 0.002
+  lr_decay_steps: 1000
+  lr_floor_frac: 0.1
+  resign_min_train_steps: 100
+gating: {games: 8, promote_threshold: 0.53}
+anchor_every_generations: 3
+seed: 0
+run_dir: runs/v2-smoke
+checkpoint_every_min: 999.0
+gate_every_generations: 5
