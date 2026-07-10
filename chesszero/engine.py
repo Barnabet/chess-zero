@@ -25,8 +25,10 @@ _SIM_TIERS = (16, 32, 64, 128, 256)
 
 
 class Engine:
-    def __init__(self, best_dir: str | Path, cfg: Config):
+    def __init__(self, best_dir: str | Path, cfg: Config,
+                 fixed_sims: int = 0):
         self.cfg = cfg
+        self.fixed_sims = fixed_sims  # nonzero pins _pick_sims (reproducible)
         self.net = ChessNet(cfg.net)
         template = self.net.init(jax.random.PRNGKey(0),
                                  jnp.zeros((1, 8, 8, 119), jnp.float32))
@@ -80,6 +82,8 @@ class Engine:
         self.board.push(move)
 
     def _pick_sims(self, movetime_s: float) -> int:
+        if self.fixed_sims:
+            return self.fixed_sims
         if self.sims_per_s is None:
             fn = self._get_search(_SIM_TIERS[0])
             jax.block_until_ready(

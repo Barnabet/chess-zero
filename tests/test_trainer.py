@@ -130,7 +130,7 @@ def test_trainer_uses_governor_and_spawns_anchor(cfg, monkeypatch):
     rows = [__import__("json").loads(l) for l in
             (pathlib.Path(cfg.run_dir) / "metrics.jsonl").read_text().splitlines()]
     assert all("resign_armed" in r for r in rows)
-    assert any("anchor" in r for r in rows)
+    assert any("anchor_negamax2" in r for r in rows)
 
 
 def test_make_lr_schedule_cosine_decay_to_floor():

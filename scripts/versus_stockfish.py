@@ -221,6 +221,9 @@ def main():
                          "position (no random opening plies)")
     ap.add_argument("--max-plies", type=int, default=400,
                     help="adjudicate draw beyond this many plies (default 400)")
+    ap.add_argument("--sims", type=int, default=0,
+                    help="pin the search simulation count "
+                         "(0 = auto by movetime)")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
@@ -230,7 +233,7 @@ def main():
     cfg = Config.from_yaml(args.config)
     print(f"loading best checkpoint from {args.best_dir} "
           f"(net {cfg.net.blocks}x{cfg.net.channels}) ...", flush=True)
-    eng = Engine(args.best_dir, cfg)
+    eng = Engine(args.best_dir, cfg, fixed_sims=args.sims)
     rng = random.Random(args.seed)
 
     baselines = {"random": lambda: RandomPlayer(rng),

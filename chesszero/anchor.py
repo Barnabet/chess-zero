@@ -11,6 +11,7 @@ import re
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 _SCORE_RE = re.compile(r"^\[([\w-]+)\] score ([\d.]+)/(\d+)", re.MULTILINE)
 
@@ -24,11 +25,14 @@ class AnchorRunner:
     def __init__(self, best_dir: str, config_path: str, games: int = 6,
                  movetime: float = 0.2, timeout_s: float = 900.0,
                  cmd: "list[str] | None" = None):
+        script = Path(__file__).resolve().parents[1] \
+            / "scripts" / "versus_stockfish.py"
         self.cmd = cmd or [
-            sys.executable, "scripts/versus_stockfish.py",
+            sys.executable, str(script),
             "--best-dir", str(best_dir), "--config", str(config_path),
             "--vs", "negamax2", "negamax3",
-            "--games", str(games), "--movetime", str(movetime)]
+            "--games", str(games), "--movetime", str(movetime),
+            "--sims", "32"]  # pinned so anchor scores compare across the run
         self.timeout_s = timeout_s
         self._proc: "subprocess.Popen | None" = None
         self._started = 0.0

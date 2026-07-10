@@ -280,8 +280,13 @@ class Trainer:
                    "sp_seconds": sp_seconds,
                    "moves_per_s": moves / sp_seconds,
                    "gen_seconds": time.time() - t0, **metrics}
-            fp_rate = resign_fp_alarm(self.holdout_fp_total,
-                                      self.holdout_n_total)
+            # Legacy lifetime-FP alarm (spec §5) only makes sense while the
+            # governor actually has resignation armed; otherwise it would
+            # keep firing on stale v1-era totals with resign disabled.
+            fp_rate = None
+            if self.governor.armed:
+                fp_rate = resign_fp_alarm(self.holdout_fp_total,
+                                          self.holdout_n_total)
             if fp_rate is not None:
                 row["resign_fp_alarm"] = fp_rate
             self._log(format_gen_line(row, cfg.train.min_buffer))
@@ -323,7 +328,8 @@ class Trainer:
                 res = self.anchor.poll()
                 if res is not None:
                     if res:
-                        row["anchor"] = res
+                        row["anchor_negamax2"] = res.get("negamax2")
+                        row["anchor_negamax3"] = res.get("negamax3")
                         self._log("ANCHOR gen %d: %s" % (gen, ", ".join(
                             f"{k} {v:.0%}" for k, v in sorted(res.items()))))
                     else:
