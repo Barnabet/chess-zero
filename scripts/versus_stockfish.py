@@ -268,7 +268,10 @@ def main():
     ap.add_argument("--sims", type=int, default=0,
                     help="pin the search simulation count "
                          "(0 = auto by movetime)")
-    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--seed", type=int, default=None,
+                    help="opponent RNG seed (default: derived from clock so "
+                         "repeat anchors vs an unchanged best sample fresh "
+                         "games instead of replaying identical ones)")
     args = ap.parse_args()
 
     from chesszero.config import Config
@@ -286,7 +289,9 @@ def main():
     print(f"loading best checkpoint from {args.best_dir} "
           f"(net {cfg.net.blocks}x{cfg.net.channels}) ...", flush=True)
     eng = Engine(args.best_dir, cfg, fixed_sims=args.sims)
-    rng = random.Random(args.seed)
+    seed = args.seed if args.seed is not None else int(time.time()) % 1_000_000
+    print(f"opponent seed {seed}")
+    rng = random.Random(seed)
 
     baselines = {"random": lambda: RandomPlayer(rng),
                  "greedy": lambda: GreedyPlayer(rng),
