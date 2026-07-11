@@ -15,7 +15,7 @@ train:
   buffer_capacity: 1000000
   min_buffer: 100000
   lr: 0.002
-  lr_decay_steps: 400000   # cosine horizon (~3 days)
+  lr_decay_steps: 200000   # shortened from 400k at step ~109k -> restart LR 9.8e-4, floor 2e-4 in ~27h
   lr_floor_frac: 0.1       # floor = 2e-4
   resign_min_train_steps: 20000
 gating: {games: 120, promote_threshold: 0.53}
